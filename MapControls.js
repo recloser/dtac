@@ -125,7 +125,6 @@ THREE.MapControls = function ( object, domElement ) {
 
 	// this method is exposed, but perhaps it would be better if we can make it private...
 	this.update = function () {
-
 		var offset = new THREE.Vector3();
 
 		// so camera.up is the orbit axis
@@ -136,6 +135,8 @@ THREE.MapControls = function ( object, domElement ) {
 		var lastQuaternion = new THREE.Quaternion();
 
 		return function update() {
+			scope.onBeforeUpdate && scope.onBeforeUpdate();
+			_changedZoom = false;
 
 			var position = scope.object.position;
 
@@ -292,6 +293,16 @@ THREE.MapControls = function ( object, domElement ) {
 	var dollyEnd = new THREE.Vector2();
 	var dollyDelta = new THREE.Vector2();
 
+	var _changedZoom = false
+
+	this.getState = function() {
+		return state;
+	}
+
+	this._changedZoom = function() {
+		return _changedZoom;
+	}
+
 	function getAutoRotationAngle() {
 
 		return 2 * Math.PI / 60 / 60 * scope.autoRotateSpeed;
@@ -402,12 +413,14 @@ THREE.MapControls = function ( object, domElement ) {
 		if ( scope.object.isPerspectiveCamera ) {
 
 			scale /= dollyScale;
+			_changedZoom = true;
 
 		} else if ( scope.object.isOrthographicCamera ) {
 
 			scope.object.zoom = Math.max( scope.minZoom, Math.min( scope.maxZoom, scope.object.zoom * dollyScale ) );
 			scope.object.updateProjectionMatrix();
 			zoomChanged = true;
+			_changedZoom = true;
 
 		} else {
 
@@ -423,12 +436,14 @@ THREE.MapControls = function ( object, domElement ) {
 		if ( scope.object.isPerspectiveCamera ) {
 
 			scale *= dollyScale;
+			_changedZoom = true;
 
 		} else if ( scope.object.isOrthographicCamera ) {
 
 			scope.object.zoom = Math.max( scope.minZoom, Math.min( scope.maxZoom, scope.object.zoom / dollyScale ) );
 			scope.object.updateProjectionMatrix();
 			zoomChanged = true;
+			_changedZoom = true;
 
 		} else {
 

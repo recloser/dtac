@@ -1,15 +1,3 @@
-// var wad = Object.create(Wad); // Create a new WAD object to load our file into
-
-// // Create a callback function when loading is complete
-// wad.onLoad = function() {
-//   setTimeout(start, 1)
-// };
-
-// wad.onProgress = function(x) {
-//   //console.log("Progress!");
-// }
-
-// wad.loadURL('freedoom2.wad');
 const PriorityQueue = require("js-priority-queue");
 
 function choose(x) {
@@ -18,24 +6,35 @@ function choose(x) {
   return y[(Math.random() * y.length) | 0]
 }
 
-var frame = 0;
-var canvas = null;
-var renderer, scene, camera, cube, controls;
-var cubeMaterial;
-var cubeMaterials = [];
-var dude, dudeMat;
-var cylinder;
+function almostEqual(a, b, eps=0.001) {
+  return Math.abs(a.x - b.x) <= eps && Math.abs(a.y - b.y) <= eps && Math.abs(a.z - b.z) <= eps
+}
+
+function swapRemove(array, thing) {
+  let idx = array.indexOf(thing);
+  if (idx == -1) return;
+
+  array[idx] = array[array.length-1];
+  array.pop();
+}
+
+function swapRemoveAt(array, idx) {
+  let item = array[idx];
+  array[idx] = array[array.length-1];
+  array.pop();
+  return item;
+}
 
 const BASE_WAD = "doom.wad";
 let g_Renderer;
 let g_World;
 let g_MainCamera;
-let g_MainCameraControls;
+let g_MainCameraControls, g_MainCameraControlsZoomChanged;
 let g_TestActor;
 let g_CurrentAction;
 
 const Resources = {
-  wads: [],
+  wads: {},
 
   loadWadFromURL: function(url, as) {
     if (as === undefined) {
@@ -54,9 +53,14 @@ const Resources = {
       }
       wadLocal.onLoad = function() {
         window.wad = wadLocal; // write to global because wadjs is buggy
-        setTimeout(function() {
-          resolve(that.wads[as] = new DTWadResource(wadLocal));
-        }, 1)
+        if (wadLocal.errormsg) {
+          alert("Couldn't load WAD: " + wadLocal.errormsg);
+          reject(wadLocal.errormsg);
+        } else {
+          setTimeout(function() {
+            resolve(that.wads[as] = new DTWadResource(wadLocal));
+          }, 1)
+        }
       }
       wadLocal.loadURL(url)
     });
@@ -72,15 +76,20 @@ function start() {
       renderer.shadowMap.type = THREE.PCFSoftShadowMap; // default THREE.PCFShadowMap
       document.body.appendChild( renderer.domElement );
 
-      g_World = new DTWorld();
-      g_MainCamera = new THREE.PerspectiveCamera( 40, window.innerWidth / window.innerHeight, 0.1, 1000 );
-      g_MainCamera.position.z = 5;
-      g_MainCamera.position.y = 2;
-      g_MainCameraControls = new THREE.MapControls( g_MainCamera );
-      //setupScene();
-      mainLoop();
+      prepareActorDefs();
 
-      // setTimeout(nextFrame, 1);
+      g_World = new DTWorld();
+      g_MainCamera = new THREE.PerspectiveCamera( 20, window.innerWidth / window.innerHeight, 0.1, 1000 );
+      g_MainCamera.position.x = 24;
+      g_MainCamera.position.z = 24;
+      g_MainCamera.position.y = 12.5;
+      g_MainCameraControls = new THREE.MapControls( g_MainCamera );
+      g_MainCameraControls.target.set(8, 0, 8);
+      g_MainCameraControls.onBeforeUpdate = function() {
+        if (g_MainCameraControls._changedZoom()) g_MainCameraControlsZoomChanged = true;
+      }
+      // g_MainCameraControls = new THREE.OrbitControls( g_MainCamera );
+      mainLoop();
     },
     function() {
       let err = "Couldn't load base wad! (" + BASE_WAD + ")";
@@ -142,30 +151,52 @@ class DTDoomSprite {
   }
 }
 
-class DTDoomSpriteAnim {
-  constructor(wadres, animdef) {
-    let i = 0;
-    let parsed = this.parsed = [];
-    for (let part of animdef) {
-      let base = part[i++];
-      let frames = part[i++];
-      let time = part[i++];
-      let animEvent = part[i++];
+class EventSource {
+  constructor() {
+    this.listeners = [];
+  }
 
-      for (let frame of frames) {
-        parsed.push({
-          frame: wadres.getSprite(base, frame),
-          time: time,
-          animEvent: animEvent,
-        });
+  on(eventName, listener, once=false) {
+    this.listeners.push({
+      eventName: eventName,
+      cb: listener,
+      once: once
+    })
+  }
+
+  disable(listener) {
+    for (let i = 0; i < this.listeners.length; i++) {
+      let l = this.listeners[i];
+      if (l.cb == listener) {
+        swapRemoveAt(this.listeners, i);
       }
     }
+  }
 
+  fire(eventName) {
+    for (let l of this.listeners) {
+      if (l.eventName == eventName) {
+        l.cb(eventName);
+        if (l.once) {
+          this.disable(l.cb)
+        }
+      }
+    }
+  }
+}
+
+class DTDoomSpriteAnim {
+  constructor(name, parsedAnim) {
+    this.name = name;
+    this.parsed = parsedAnim;
     this.dtAccum = 0;
     this.currentFrameNumber = 0;
+    this._finished = false;
+    this.events = new EventSource();
   }
 
   start() {
+    this._finished = false;
     this.changeToFrame(0);
   }
 
@@ -174,19 +205,29 @@ class DTDoomSpriteAnim {
     let {frame, time, animEvent} = this.parsed[this.currentFrameNumber];
     this.frame = frame;
     this.ticsToGo = time;
-    if (animEvent && this.onAnimEvent) {
-      this.onAnimEvent(animEvent);
+    if (animEvent) {
+      this.events.fire(animEvent);
     }
   }
 
+  isFinished() {
+    return this._finished;
+  }
+
   advance(dt) {
+    if (this.ticsToGo == -1) return;
     const TIC = 1.0/35.0;
     this.dtAccum += dt;
     while(this.dtAccum >= TIC) {
       this.dtAccum -= TIC;
       this.ticsToGo -= 1;
       if (this.ticsToGo == 0) {
-        this.changeToFrame((this.currentFrameNumber + 1) % this.parsed.length);
+        let nf = this.currentFrameNumber + 1;
+        if (nf >= this.parsed.length) {
+          this._finished = true;
+          this.events.fire("finished");
+        }
+        this.changeToFrame(nf % this.parsed.length);
       }
     }
   }
@@ -215,7 +256,7 @@ class DTTileModel {
   }
 }
 
-function moveTowards0(from, to, step) {
+function moveTowards(from, to, step) {
   let tmp = to.clone();
   tmp.sub(from);
   if (tmp.length() < step) {
@@ -227,7 +268,7 @@ function moveTowards0(from, to, step) {
   }
 }
 
-function* combined(...gens) {
+function* doCombined(...gens) {
   while(gens.length != 0) {
     let dt = yield;
     let newgens = [];
@@ -239,11 +280,11 @@ function* combined(...gens) {
   }
 }
 
-function* moveTowards(from, to, step_) {
+function* doMoveTowards(from, to, unitsPerSecond) {
   while(!from.equals(to)) {
     let tmp = to.clone();
     let dt = yield;
-    let step = step_ * dt;
+    let step = unitsPerSecond * dt;
     tmp.sub(from);
     if (tmp.length() < step) {
       from.copy(to);
@@ -255,16 +296,14 @@ function* moveTowards(from, to, step_) {
   }
 }
 
-function* faceTowards(actor, position, step_) {
+function* doFaceTowards(actor, position, degsPerSecond) {
   let cp = position.clone();
   cp.sub(actor.object.position) // .subVectors(cam.position, cp);
   cp.y = 0;
   cp.normalize();
   let rads = new THREE.Vector2(cp.z, -cp.x).angle();//new Math.atan2(cp.x, cp.z);
   let degs = THREE.Math.radToDeg(rads);
-  console.log("degs: " + degs);
   let needToRotate = degs - actor.facing;
-  console.log("needToRotate1: " + needToRotate);
   if (needToRotate > 180) needToRotate = needToRotate - 360;
   if (needToRotate < -180) needToRotate = needToRotate + 360;
   let stepSign = 1;
@@ -272,11 +311,10 @@ function* faceTowards(actor, position, step_) {
     stepSign = -1;
     needToRotate = -needToRotate;
   }
-  console.log("needToRotate2: " + needToRotate);
   let amountRotated = 0;
   while(actor.facing != degs) {
     let dt = yield;
-    let step = step_ * dt;
+    let step = degsPerSecond * dt;
     if (Math.abs(amountRotated - needToRotate) < step) {
       actor.facing = degs;
       amountRotated = needToRotate;
@@ -287,24 +325,95 @@ function* faceTowards(actor, position, step_) {
   }
 }
 
+const DEFAULT_ROTATION_SPEED = 360;
+
+function spawnProjectile(def, owner, at, dir) {
+  let p = new DTActor(def);
+  p.owner = owner;
+  p.setPosition(at);
+  p.setTravelDirection(dir);
+  g_World.addActor(p);
+  return p;
+}
+
+function* doProcessProjectile(p) {
+  let raycaster = new THREE.Raycaster();
+  let oldPos = new THREE.Vector3();
+  while(p.isAlive()) {
+    let dt = yield;
+
+    if (!g_World.isWithinBounds(p.position)) {
+      p.die();
+      break;
+    }
+
+    oldPos.copy(p.position);
+    let step = p.actordef.speed * dt
+    let to = p.travelDirection.clone().multiplyScalar(step).add(p.position)
+    moveTowards(p.position, to, step);
+    let dist = step;
+    raycaster.far = dist;
+    raycaster.set(p.position, p.travelDirection.clone().normalize());
+    let intersected = raycaster.intersectObjects( g_World.collidables );
+    if (intersected.length) {
+      let hitSomething = false;
+      for (const data of intersected) {
+        const int = data.object;
+        if (int === p.collisionObject || int === p.owner.collisionObject) continue;
+        hitSomething = true;
+        const a = int.dtacActor;
+        if (a && !a.isProjectile && a != p.owner) {
+          a.hurt(p.damage, p);
+        }
+      }
+      if (hitSomething) p.die();
+    }
+  }
+}
+
+function* startAnimAndWaitForEvent(anim, eventName) {
+  anim.start();
+  let done = false;
+  let success = false;
+  anim.events.on(eventName, () => success = done = true, true);
+  anim.events.on("finished", () => done = true, true);
+  while(!done) yield;
+  return success;
+}
+
+function* doAttack(actor, victim, attackDef) {
+  if (actor === victim) {
+    console.error("An actor can attack itself");
+    return;
+  }
+  yield* doFaceTowards(actor, victim.position, DEFAULT_ROTATION_SPEED);
+  actor.playAnim("attackAnim", false);
+
+  yield* startAnimAndWaitForEvent(actor.anim, "attack");
+  let pos = actor.position.clone();
+  pos.y += 0.5;
+  let dir = victim.position.clone()/*.add(attackDef)*/.sub(pos);
+  dir.y += 0.5;
+  dir.normalize();
+  pos.add(dir.clone().multiplyScalar(0.25));
+  let projDef = ActorDefs[actor.actordef.baseAttackProjectileName];
+  let p = spawnProjectile(projDef, actor, pos, dir);
+  // actor.playAnim("idleAnim");
+  yield* doProcessProjectile(p);
+}
+
 function* doTravel(actor, path) {
-  actor.setAnim(actor.actordef.preparedAnims.walkAnim);
+  actor.playAnim("walkAnim");
   for (let tile of path) {
     let tpos = tile.position.clone();
     tpos.y += 0.5;
-    yield* combined(
-      faceTowards(actor, tpos, 360),
-      moveTowards(actor.object.position, tpos, 4)
+    yield* doCombined(
+      doFaceTowards(actor, tpos, DEFAULT_ROTATION_SPEED),
+      doMoveTowards(actor.object.position, tpos, 4)
     );
     actor.setTile(tile);
   }
-  actor.setAnim(actor.actordef.preparedAnims.idleAnim);
-}
-
-class TravelAction {
-  constructor(actor, path) {
-    actor.setAnim(actor.actordef.preparedAnims.walkAnim);
-  }
+  actor.playAnim("idleAnim");
 }
 
 const walkableObjectMaterialTest = new THREE.MeshLambertMaterial({color: 0x00ffff, transparent: true, opacity: 0.25})
@@ -424,14 +533,16 @@ class DTWorld {
     this.grid = [];
     this.tiles = [];
     this.walkable = [];
+    this.collidables = [];
+    this.actors = new Set();
     let scene = this.scene = new THREE.Scene();
 
-    let qweqeq = {
-      id: [1, 0, 1],
-      walkable: true,
-      links: [[2, 0, 1]],
-      model: "Box"
-    }
+    // let qweqeq = {
+    //   id: [1, 0, 1],
+    //   walkable: true,
+    //   links: [[2, 0, 1]],
+    //   model: "Box"
+    // }
 
     let plane = new THREE.PlaneGeometry();
     plane.rotateX(THREE.Math.degToRad(-90));
@@ -446,15 +557,10 @@ class DTWorld {
       for (let x = 0; x < 16; x++) {
         let t = new DTTile(basic, x, 0, z);
         this.tiles.push(t);
+        this.collidables.push(t.renderObject)
         if (t.walkableObject) this.walkable.push(t.walkableObject);
         this.scene.add(t.object);
         this.grid[XYZtoID(x, 0, z)] = t;
-
-        if (false && s((z % 4) ^ (x % 4)) == 1) {
-          let actor = new DTActor();
-          this.scene.add(actor.object);
-          actor.setPosition(x, 0.5, z);
-        }
       }
     }
 
@@ -483,9 +589,37 @@ class DTWorld {
     scene.add(sun.target);
     sun.target.position.set(-1, -1.5, -2.34);
 
-    let actor = g_TestActor = new DTActor();
-    this.scene.add(actor.object);
+
+    let adef = ActorDefs.Imp.resourcesFound ? ActorDefs.Imp : ActorDefs.Serpentipede;
+    let actor = g_TestActor = new DTActor(adef);
     actor.setTile(this.tileAt(3, 0, 3));
+    this.addActor(actor);
+
+    let actor2 = new DTActor(adef);
+    actor2.setTile(this.tileAt(10, 0, 5));
+    this.addActor(actor2);
+
+    this.bbox = new THREE.Box3();
+    for (let tile of this.tiles) {
+      this.bbox.expandByObject(tile.object);
+    }
+    this.bbox.expandByPoint(new THREE.Vector3(0, 20, 0));
+  }
+
+  isWithinBounds(position) {
+    return this.bbox.containsPoint(position);
+  }
+
+  addActor(actor) {
+    this.scene.add(actor.object);
+    this.actors.add(actor);
+    if (actor.collisionObject) this.collidables.push(actor.collisionObject)
+  }
+
+  removeActor(actor) {
+    this.scene.remove(actor.object);
+    this.actors.delete(actor);
+    if (actor.collisionObject) swapRemove(this.collidables, actor.collisionObject)
   }
 
   tileAt(x, y, z) {
@@ -495,17 +629,21 @@ class DTWorld {
 }
 
 class DTActor {
-  constructor() {
+  constructor(actordef) {
+    this._dead = false;
+    this.actordef = actordef;
+
     let geometry = new THREE.PlaneGeometry( 1, 1, 1 );
     geometry.translate(0, 0.5, 0);
 
     let material = new THREE.MeshLambertMaterial( {color: 0xffffff, side: THREE.DoubleSide, transparent: true} );
-    let spr = Resources.wads[BASE_WAD].getSprite(choose('TROO', 'POSS', 'SARG', 'BOSS'), 'A')
-
-    material.map = null // spr.bydir[0].texture
+    material.map = null;
 
     this.renderObject = new THREE.Mesh( geometry, material );
     this.renderObject.castShadow = true;
+
+    this.collisionObject = this.renderObject; // FIXME: make this a cylinder
+    this.collisionObject.dtacActor = this;
 
     this.facing = 0;
     let facingDir = new THREE.Vector3( 0, 0, 1 );
@@ -516,51 +654,50 @@ class DTActor {
     this.object.add(facingArrow);
     this.object.translateY(0.5);
 
-    // let anim = this.anim = new DTDoomSpriteAnim(spr.wadres, Serpentipede.idleAnim);
-    // anim.start();
+    this.playAnim("idleAnim");
 
-    this.actordef = {
-      preparedAnims: {
-        walkAnim: new DTDoomSpriteAnim(spr.wadres, Serpentipede.walkAnim),
-        idleAnim: new DTDoomSpriteAnim(spr.wadres, Serpentipede.idleAnim),
+    this.hp = 2;
+
+    this.renderObject.onBeforeRender = (r, s, cam) => {
+      let v = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), THREE.Math.degToRad(-this.facing));
+      facingArrow.setDirection(v);
+    }
+  }
+
+  update(dt) {
+    this.anim.advance(dt);
+    if (this.anim.isFinished()) {
+      this.playAnim("idleAnim");
+    }
+
+    if (!this.isAlive()) {
+      let playingDeath = this.anim && (this.anim.name == "deathAnim" || this.anim.name == "deathAnimX");
+      if (!playingDeath) {
+        g_World.removeActor(this);
       }
     }
 
-    this.anim = this.actordef.preparedAnims.walkAnim;
-    this.anim.start();
+    let cam = g_MainCamera;
+    let cp = cam.position.clone();
+    cp.y *= 0.2;
+    this.renderObject.lookAt(cp);
 
-    let lastTime;
-    this.renderObject.onBeforeRender = (r, s, cam) => {
-      if (lastTime === undefined) lastTime = performance.now();
-      let thisTime = performance.now();
-      let dt = (thisTime  - lastTime) / 1000.0;
-      lastTime = thisTime;
-      this.anim.advance(dt);
+    cp.sub(this.object.position)
+    cp.y = 0;
+    cp.normalize();
+    let rads = new THREE.Vector2(cp.z, cp.x).angle();
+    let degs = THREE.Math.radToDeg(rads);
+    degs += 22.5 + this.facing;
+    let dir = (((degs / 45)|0) % 8);
 
-      // facing += 0.25;
-      let facing = this.facing;
-      facingArrow.setDirection(new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), THREE.Math.degToRad(-facing)))
+    let fr = this.anim.frame.bydir[dir];
+    if (!fr) fr = this.anim.frame.bydir[0];
+    this.renderObject.material.map = fr.texture;
+    this.renderObject.material.needsUpdate = true;
 
-      let cp = cam.position.clone();
-      cp.y *= 0.33;
-      this.renderObject.lookAt(cp);
-
-      cp.sub(this.object.position) // .subVectors(cam.position, cp);
-      cp.y = 0;
-      cp.normalize();
-      let rads = new THREE.Vector2(cp.z, cp.x).angle();//new Math.atan2(cp.x, cp.z);
-      let degs = THREE.Math.radToDeg(rads);
-      degs += 22.5 + facing;
-      let dir = ((degs / 45)|0) % 8;
-
-      let fr = this.anim.frame.bydir[dir];
-      if (!fr) fr = this.anim.frame.bydir[0];
-      material.map = fr.texture;
-
-      let xx = fr.graphic.width / 50;
-      let yy = fr.graphic.height / 50;
-      this.renderObject.scale.set(xx, yy, 1)
-    }
+    let xx = fr.graphic.width / 50;
+    let yy = fr.graphic.height / 50;
+    this.renderObject.scale.set(xx, yy, 1)
   }
 
   setAnim(anim, start = true) {
@@ -568,12 +705,29 @@ class DTActor {
     if (start && this.anim) this.anim.start();
   }
 
+  hasAnim(animName) {
+    return this.actordef.parsedAnims[animName] !== undefined;
+  }
+
+  playAnim(animName, start = true) {
+    if (this.anim && this.anim.name == animName) {
+      this.anim.start();
+      return;
+    }
+
+    let pa = this.actordef.parsedAnims[animName];
+    if (!pa) throw "No anim " + animName + " for actor " + this.actordef.name;
+    let anim = new DTDoomSpriteAnim(animName, pa);
+    this.setAnim(anim, start);
+  }
+
   setTile(tile, warpTo = true) {
+    if (tile && tile.actor) throw "Something already stands on that tile";
     if (this.tile) this.tile.actor = null;
     this.tile = tile;
-    this.tile.actor = this;
+    if(this.tile) this.tile.actor = this;
 
-    if (warpTo) {
+    if (this.tile && warpTo) {
       const {x, y, z} = tile.position;
       this.setPosition(x, y + 0.5, z);
     }
@@ -583,21 +737,169 @@ class DTActor {
     if (y === undefined) this.object.position.copy(x);
     else this.object.position.set(x, y, z);
   }
+
+  get position() {
+    return this.object.position;
+  }
+
+  set position(value) {
+    this.object.position = value;
+  }
+
+  get isProjectile() {
+    return !!this.actordef.isProjectile;
+  }
+
+  setTravelDirection(dir) {
+    if (!this.travelDirection) this.travelDirection = new THREE.Vector3();
+    this.travelDirection.copy(dir);
+  }
+
+  hurt(damage, source) {
+    console.warn("hurt unimplemented")
+    this.hp -= 1;
+    if (this.hp <= 0) this.die();
+    else if (this.hasAnim("painAnim")) {
+      this.playAnim("painAnim");
+    }
+    // if (this.hasAnim("deathAnim")) {
+    //   this.playAnim("deathAnim");
+    // }
+  }
+
+  isAlive() {
+    return this._dead !== true;
+  }
+
+  die() {
+    this._dead = true;
+    this.setTile(null);
+    if (this.hasAnim("deathAnim")) {
+      this.playAnim("deathAnim");
+    } else {
+      g_World.removeActor(this);
+    }
+  }
 }
 
 const LightUp = {}
 
-const Serpentipede = {
-  name: "Serpentipede",
-  graphicName: "TROO",
-  from: ["freedoom2"],
+const ImpSerpRaws = {
   idleAnim: [
     ["TROO", "AB", 15]
   ],
   walkAnim: [
     ["TROO", "ABCD", 7, "travel"]
   ],
+  attackAnim: [
+    ["TROO", "EF", 8],
+    ["TROO", "G", 6, "attack"]
+  ],
+  painAnim: [
+    ["TROO", "H", 8, "pain"]
+  ],
+  deathAnim: [
+    ["TROO", "I", 8],
+    ["TROO", "J", 8, "deathscream"],
+    ["TROO", "K", 6],
+    ["TROO", "L", 6, "noblocking"],
+    ["TROO", "M", -1],
+  ],
+  deathAnimX: [
+    ["TROO", "N", 5],
+    ["TROO", "O", 5, "xdeathscream"],
+    ["TROO", "P", 5],
+    ["TROO", "Q", 5, "noblocking"],
+    ["TROO", "RST", 5],
+    ["TROO", "U ", -1],
+  ],
+};
 
+const ImpSerpBallRaws = {
+  idleAnim: [
+    ["BAL1", "AB", 4]
+  ],
+  deathAnim: [
+    ["BAL1", "CDE", 6]
+  ]
+}
+
+const ActorDefs = {
+  Serpentipede: { // needs update
+    name: "Serpentipede",
+    from: ["freedoom2.wad"],
+    speed: 15,
+    rawAnims: ImpSerpRaws,
+    baseAttackProjectileName: "SerpentipedeBall"
+  },
+
+  SerpentipedeBall: {
+    name: "Serpentipede Ball",
+    from: ["freedoom2.wad"],
+    speed: 9,
+    isProjectile: true,
+    rawAnims: ImpSerpBallRaws
+  },
+
+  Imp: {
+    name: "Imp",
+    from: ["doom.wad", "doom2.wad"],
+    speed: 15,
+    rawAnims: ImpSerpRaws,
+    baseAttackProjectileName: "ImpBall"
+  },
+
+  ImpBall: {
+    name: "Imp Ball",
+    from: ["doom.wad", "doom2.wad"],
+    speed: 9,
+    isProjectile: true,
+    rawAnims: ImpSerpBallRaws
+  }
+}
+
+function prepareActorDefs() {
+  for (let adefname in ActorDefs) {
+    let adef = ActorDefs[adefname];
+    let rawAnims = adef.rawAnims;
+    if (adef.parsedAnims) continue; // already parsed
+
+    let wadres;
+    for (let wadname of adef.from) {
+      if (wadres = Resources.wads[wadname]) break;
+    }
+    if (!wadres) {
+      console.warn("No resource WAD for actor " + adefname)
+      adef.resourcesFound = false;
+      continue;
+    }
+
+    adef.resourcesFound = true;
+
+    adef.parsedAnims = {};
+    for (let rawAnimName in rawAnims) {
+      let parsed = [];
+      for (let part of rawAnims[rawAnimName]) {
+        let i = 0;
+        let base = part[i++];
+        if (typeof(base) != "string") throw "Not a string";
+        let frames = part[i++];
+        if (typeof(frames) != "string") throw "Not a string";
+        let time = part[i++];
+        if (typeof(time) != "number") throw "Not a number";
+        let animEvent = part[i++];
+
+        for (let frame of frames) {
+          parsed.push({
+            frame: wadres.getSprite(base, frame),
+            time: time,
+            animEvent: animEvent,
+          });
+        }
+      }
+      adef.parsedAnims[rawAnimName] = parsed;
+    }
+  }
 }
 
 const ZombieMan = {
@@ -620,12 +922,6 @@ const ZombieMan = {
     damagePerBullet: () => (Math.random() * 4 + 1) * 3,
     puff: "BulletPuff",
   })
-}
-
-class DTZombieMan {
-  constructor() {
-    this.mesh = new THREE.Mesh();
-  }
 }
 
 var g_Raycaster = new THREE.Raycaster();
@@ -662,7 +958,7 @@ function loadSpriteFromWad(wad, sprite, frame) {
 
   let results = [];
 
-  for (let f = 1; f <= 8; f++) {
+  for (let f = 0; f <= 8; f++) {
     let graphic = Object.create(Graphic);
 
     let flip = false;
@@ -730,19 +1026,8 @@ function mainLoop(currentTime) {
   let dt = (this.lastCurrentTime ? currentTime - this.lastCurrentTime : 0) / 1000.0;
   this.lastCurrentTime = currentTime;
   requestAnimationFrame( mainLoop );
-  // cube.rotation.z += 0.01;
-  // cube.rotation.y += 0.01;
-  // let cp = camera.position.clone();
-  // cp.y *= 0.33;
-  // dude.lookAt(cp);
 
-
-  // update the picking ray with the camera and mouse position
-  // let s = 1 + Math.sin(performance.now() * 0.001) * 0.02;
-  // dude.scale.set(s, s, s)
-  // cylinder.scale.set(s, s, s)
-
-	g_Raycaster.setFromCamera( g_MousePosition, g_MainCamera );
+  g_Raycaster.setFromCamera( g_MousePosition, g_MainCamera );
 
   for (let [obj, oldMat] of oldIntersects) {
     obj.material = oldMat;
@@ -762,14 +1047,6 @@ function mainLoop(currentTime) {
       let obj = intersects[ i ].object;
       if (!obj.dtacTile) continue;
 
-      // for (let tile of [obj.dtacTile].concat(obj.dtacTile.links)) {
-      //   let obj = tile.walkableObject;
-      //   let oldMat = obj.material;
-      //   obj.material = walkableObjectMaterial;
-      //   oldIntersects.push([obj, oldMat]);
-      // }
-
-
       let p = findPath(g_TestActor.tile, obj.dtacTile);
       for (let t of p) {
         let obj = t.walkableObject;
@@ -779,15 +1056,43 @@ function mainLoop(currentTime) {
       }
 
       if (g_DoMove && p[p.length-1] == obj.dtacTile) {
-        // g_TestActor.setTile(obj.dtacTile)
         p.shift();
-        g_CurrentAction = doTravel(g_TestActor, p);
+        let a = obj.dtacTile.actor;
+        if (a && a.isAlive() && a !== g_TestActor) {
+          g_CurrentAction = doAttack(g_TestActor, a);
+        } else {
+          g_CurrentAction = doTravel(g_TestActor, p);
+        }
       }
-      g_DoMove = false;
     }
   }
+  g_DoMove = false;
 
+  if (this.lerping || g_CurrentAction) {
+    this.lerping = true;
+
+    const PAN = 8, ROTATE = 3;
+    const camState = g_MainCameraControls.getState();
+
+    if (this.initOffset === undefined || g_MainCameraControlsZoomChanged || camState & ROTATE) {
+      this.initOffset = g_MainCamera.position.clone().sub(g_MainCameraControls.target)
+    };
+    g_MainCameraControls.target.lerp(g_TestActor.object.position, 0.05);
+    let t = g_TestActor.object.position.clone();
+    t.add(this.initOffset);
+    g_MainCamera.position.lerp(t, 0.05);
+    if (camState & PAN || almostEqual(g_MainCamera.position, t, 0.1)) {
+      this.lerping = false;
+      this.initOffset = undefined;
+    };
+  }
+  g_MainCameraControlsZoomChanged = false;
   g_MainCameraControls.update();
+
+  g_World.actors.forEach(actor => {
+    actor.update(dt);
+  })
+
 	g_Renderer.render( g_World.scene, g_MainCamera );
 }
 
@@ -800,8 +1105,28 @@ function isPowerOfTwo(x)
     return (x & (x - 1)) == 0;
 }
 
-
 /*
+// var wad = Object.create(Wad); // Create a new WAD object to load our file into
+
+// // Create a callback function when loading is complete
+// wad.onLoad = function() {
+//   setTimeout(start, 1)
+// };
+
+// wad.onProgress = function(x) {
+//   //console.log("Progress!");
+// }
+
+// wad.loadURL('freedoom2.wad');
+
+var frame = 0;
+var canvas = null;
+var renderer, scene, camera, cube, controls;
+var cubeMaterial;
+var cubeMaterials = [];
+var dude, dudeMat;
+var cylinder;
+
 function setupScene() {
   scene = new THREE.Scene();
 
