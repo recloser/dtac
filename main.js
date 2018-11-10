@@ -10,6 +10,10 @@ function almostEqual(a, b, eps=0.001) {
   return Math.abs(a.x - b.x) <= eps && Math.abs(a.y - b.y) <= eps && Math.abs(a.z - b.z) <= eps
 }
 
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
 function swapRemove(array, thing) {
   let idx = array.indexOf(thing);
   if (idx == -1) return;
@@ -25,7 +29,7 @@ function swapRemoveAt(array, idx) {
   return item;
 }
 
-const BASE_WAD = "doom.wad";
+const BASE_WAD = "freedoom2.wad";
 let g_Renderer;
 let g_World;
 let g_MainCamera;
@@ -69,6 +73,19 @@ const Resources = {
 
 function start() {
   Resources.loadWadFromURL(BASE_WAD).then(
+    function() {
+      return Resources.loadWadFromURL("doom.wad");
+    },
+    function() {
+      let err = "Couldn't load base wad! (" + BASE_WAD + ")";
+      console.error(err);
+      document.body.appendChild(err);
+    }
+  )
+  // Promise.all([
+  //   Resources.loadWadFromURL(BASE_WAD)
+  // ])
+  .then(
     function() {
       let renderer = g_Renderer = new THREE.WebGLRenderer();
       renderer.setSize( window.innerWidth * 1.0, window.innerHeight * 1.0);
@@ -296,12 +313,22 @@ function* doMoveTowards(from, to, unitsPerSecond) {
   }
 }
 
-function* doFaceTowards(actor, position, degsPerSecond) {
+function faceTowards(actor, position) {
   let cp = position.clone();
-  cp.sub(actor.object.position) // .subVectors(cam.position, cp);
+  cp.sub(actor.object.position)
   cp.y = 0;
   cp.normalize();
-  let rads = new THREE.Vector2(cp.z, -cp.x).angle();//new Math.atan2(cp.x, cp.z);
+  let rads = new THREE.Vector2(cp.z, -cp.x).angle();;
+  let degs = THREE.Math.radToDeg(rads);
+  actor.facing = degs;
+}
+
+function* doFaceTowards(actor, position, degsPerSecond) {
+  let cp = position.clone();
+  cp.sub(actor.object.position)
+  cp.y = 0;
+  cp.normalize();
+  let rads = new THREE.Vector2(cp.z, -cp.x).angle();;
   let degs = THREE.Math.radToDeg(rads);
   let needToRotate = degs - actor.facing;
   if (needToRotate > 180) needToRotate = needToRotate - 360;
@@ -333,6 +360,7 @@ function spawnProjectile(def, owner, at, dir) {
   p.setPosition(at);
   p.setTravelDirection(dir);
   g_World.addActor(p);
+  faceTowards(p, p.position.clone().add(dir));
   return p;
 }
 
@@ -359,7 +387,7 @@ function* doProcessProjectile(p) {
       let hitSomething = false;
       for (const data of intersected) {
         const int = data.object;
-        if (int === p.collisionObject || int === p.owner.collisionObject) continue;
+        if (int === p.collisionObject || int === p.owner.collisionObject || (int.dtacActor && !int.dtacActor.isAlive())) continue;
         hitSomething = true;
         const a = int.dtacActor;
         if (a && !a.isProjectile && a != p.owner) {
@@ -381,6 +409,24 @@ function* startAnimAndWaitForEvent(anim, eventName) {
   return success;
 }
 
+function getPosAndDirForAttack(actor, victim, attackDef, pos, dir) {
+  let ret = !(pos && dir);
+  pos = pos ? pos.copy(actor.position) : actor.position.clone();
+  pos.y += 0.5;
+  dir = (dir ? dir.copy(victim.position) : victim.position.clone()).sub(pos);
+  dir.y += 0.5;
+  dir.normalize();
+
+  let mx = new THREE.Matrix4().lookAt(dir, new THREE.Vector3(0,0,0), new THREE.Vector3(0,1,0));
+  dir.set(0, 0, 1);
+  dir.applyEuler(new THREE.Euler(0, THREE.Math.degToRad(randomBetween(-8, 8)), 0));
+  dir.applyMatrix4(mx);
+
+  pos.add(dir.clone().multiplyScalar(0.25));
+
+  if (ret) return [pos, dir];
+}
+
 function* doAttack(actor, victim, attackDef) {
   if (actor === victim) {
     console.error("An actor can attack itself");
@@ -390,21 +436,19 @@ function* doAttack(actor, victim, attackDef) {
   actor.playAnim("attackAnim", false);
 
   yield* startAnimAndWaitForEvent(actor.anim, "attack");
-  let pos = actor.position.clone();
-  pos.y += 0.5;
-  let dir = victim.position.clone()/*.add(attackDef)*/.sub(pos);
-  dir.y += 0.5;
-  dir.normalize();
-  pos.add(dir.clone().multiplyScalar(0.25));
+
+  let [pos, dir] = getPosAndDirForAttack(actor, victim, attackDef);
+
   let projDef = ActorDefs[actor.actordef.baseAttackProjectileName];
   let p = spawnProjectile(projDef, actor, pos, dir);
-  // actor.playAnim("idleAnim");
+  g_TrackedActor = p;
   yield* doProcessProjectile(p);
 }
 
 function* doTravel(actor, path) {
   actor.playAnim("walkAnim");
   for (let tile of path) {
+    if (tile === actor.tile) continue;
     let tpos = tile.position.clone();
     tpos.y += 0.5;
     yield* doCombined(
@@ -448,6 +492,10 @@ class DTTile {
     return this.position.distanceTo(other.position);
   }
 
+  isOccupied() {
+    return !!this.actor;
+  }
+
   get actor() {
     return this._actor;
   }
@@ -463,6 +511,31 @@ function XYZtoID(x, y, z) {
 
 function IDtoXYZ(id) {
   return [(0xFF & id), 0xFF & id >> 8, 0xFF & id >> 16]
+}
+
+function findReachableTiles(from, range) {
+  if (range === undefined) throw "Undefined range";
+  let reachables = [];
+  let alreadyChecked = new Set();
+  let toCheck = [[from, 0]];
+  alreadyChecked.add(from);
+
+  while(toCheck.length) {
+    let [t, l] = toCheck.pop();
+
+    let r = l + 1;
+    if (r > range) continue;
+
+    for (let n of t.links) {
+      if (!n.isOccupied() && !alreadyChecked.has(n)) {
+        alreadyChecked.add(n);
+        toCheck.push([n, r]);
+        reachables.push({tile: n, from: t});
+      }
+    }
+  }
+
+  return reachables;
 }
 
 function _reconstructPath(cameFrom, current) {
@@ -489,25 +562,15 @@ function findPath(from, to) {
   openSet.add(from);
   let queue = new PriorityQueue({comparator: (a, b) => getF(a) - getF(b)});
   queue.queue(from);
-  //let queue = [from];
 
   while (queue.length) {
     let current = queue.dequeue();
-
-    // let current = queue[0];
-    // let j = 0;
-    // for (let i = 1; i < queue.length; i++) {
-    //   if (getF(queue[i]) < getF(current)) {
-    //     j = i;
-    //     current = queue[i]
-    //   };
-    // }
-    // queue.splice(j, 1)
 
     if (current === to) return _reconstructPath(cameFrom, current);
     closedSet.add(current);
 
     for (let link of current.links) {
+      if (link.isOccupied()) continue;
       if (closedSet.has(link)) continue;
 
       let g = getG(current) + current.distanceTo(link);
@@ -533,9 +596,11 @@ class DTWorld {
     this.grid = [];
     this.tiles = [];
     this.walkable = [];
+    this.pickable = [];
     this.collidables = [];
-    this.actors = new Set();
+    this.actors = [];
     let scene = this.scene = new THREE.Scene();
+    scene.add(g_ActorHoverCursor); // oops
 
     // let qweqeq = {
     //   id: [1, 0, 1],
@@ -558,7 +623,10 @@ class DTWorld {
         let t = new DTTile(basic, x, 0, z);
         this.tiles.push(t);
         this.collidables.push(t.renderObject)
-        if (t.walkableObject) this.walkable.push(t.walkableObject);
+        if (t.walkableObject) {
+          this.walkable.push(t.walkableObject);
+          this.pickable.push(t.walkableObject);
+        }
         this.scene.add(t.object);
         this.grid[XYZtoID(x, 0, z)] = t;
       }
@@ -589,15 +657,42 @@ class DTWorld {
     scene.add(sun.target);
     sun.target.position.set(-1, -1.5, -2.34);
 
+    let mydef = ActorDefs.Imp.resourcesFound ? ActorDefs.Imp : ActorDefs.Serpentipede;
+    let mydef2 = ActorDefs.HellKnight.resourcesFound ? ActorDefs.HellKnight : ActorDefs.PainBringer;
+    {
+      let actor = new DTActor(mydef);
+      actor.side = SIDE_PLAYER;
+      actor.setTile(this.tileAt(3, 0, 3));
+      this.addActor(actor);
 
-    let adef = ActorDefs.Imp.resourcesFound ? ActorDefs.Imp : ActorDefs.Serpentipede;
-    let actor = g_TestActor = new DTActor(adef);
-    actor.setTile(this.tileAt(3, 0, 3));
-    this.addActor(actor);
+      actor = new DTActor(mydef);
+      actor.side = SIDE_PLAYER;
+      actor.setTile(this.tileAt(4, 0, 7));
+      this.addActor(actor);
 
-    let actor2 = new DTActor(adef);
-    actor2.setTile(this.tileAt(10, 0, 5));
-    this.addActor(actor2);
+      actor = new DTActor(ActorDefs.FreedoomGuy);
+      actor.side = SIDE_PLAYER;
+      actor.setTile(this.tileAt(8, 0, 2));
+      this.addActor(actor);
+    }
+
+    let enemydef = ActorDefs.Serpentipede;
+    {
+      let actor2 = new DTActor(enemydef);
+      actor2.setTile(this.tileAt(10, 0, 5));
+      actor2.side = SIDE_AI;
+      this.addActor(actor2);
+
+      actor2 = new DTActor(enemydef);
+      actor2.setTile(this.tileAt(11, 0, 3));
+      actor2.side = SIDE_AI;
+      this.addActor(actor2);
+
+      actor2 = new DTActor(ActorDefs.PainBringer);
+      actor2.setTile(this.tileAt(14, 0, 3));
+      actor2.side = SIDE_AI;
+      this.addActor(actor2);
+    }
 
     this.bbox = new THREE.Box3();
     for (let tile of this.tiles) {
@@ -612,14 +707,23 @@ class DTWorld {
 
   addActor(actor) {
     this.scene.add(actor.object);
-    this.actors.add(actor);
-    if (actor.collisionObject) this.collidables.push(actor.collisionObject)
+    this.actors.push(actor);
+    if (actor.collisionObject) {
+      this.collidables.push(actor.collisionObject);
+      this.pickable.push(actor.collisionObject);
+    }
+    this.pickable.push(actor.renderObject);
   }
 
   removeActor(actor) {
     this.scene.remove(actor.object);
-    this.actors.delete(actor);
-    if (actor.collisionObject) swapRemove(this.collidables, actor.collisionObject)
+    // this.actors.delete(actor);
+    swapRemove(this.actors, actor);
+    if (actor.collisionObject) {
+      swapRemove(this.collidables, actor.collisionObject);
+      swapRemove(this.pickable, actor.collisionObject);
+    }
+    swapRemove(this.pickable, actor.renderObject);
   }
 
   tileAt(x, y, z) {
@@ -628,9 +732,13 @@ class DTWorld {
   }
 }
 
+const ActorCollisionGeom = new THREE.CylinderGeometry(0.4, 0.4, 1, 8, 1);
+{ ActorCollisionGeom.translate(0, 0.5, 0); }
+const ActorCollisionMaterial = new THREE.MeshBasicMaterial({color: 0xff00ff, wireframe: true, visible: false});
 class DTActor {
   constructor(actordef) {
     this._dead = false;
+    this.acted = false;
     this.actordef = actordef;
 
     let geometry = new THREE.PlaneGeometry( 1, 1, 1 );
@@ -640,23 +748,36 @@ class DTActor {
     material.map = null;
 
     this.renderObject = new THREE.Mesh( geometry, material );
+    this.renderObject.dtacActor = this;
     this.renderObject.castShadow = true;
 
-    this.collisionObject = this.renderObject; // FIXME: make this a cylinder
-    this.collisionObject.dtacActor = this;
+    // this.collisionObject = this.renderObject; // FIXME: make this a cylinder
+
+    if (!actordef.isProjectile) {
+      this.collisionObject = new THREE.Mesh(ActorCollisionGeom, ActorCollisionMaterial);
+      this.collisionObject.dtacActor = this;
+    }
 
     this.facing = 0;
     let facingDir = new THREE.Vector3( 0, 0, 1 );
     let facingArrow = new THREE.ArrowHelper(facingDir, new THREE.Vector3(0, 0.5, 0), 0.5);
 
     this.object = new THREE.Group();
+    this.object.dtacActor = this;
     this.object.add(this.renderObject);
+    if (this.collisionObject) this.object.add(this.collisionObject);
     this.object.add(facingArrow);
     this.object.translateY(0.5);
 
     this.playAnim("idleAnim");
 
     this.hp = 2;
+    this.side = SIDE_AI;
+
+    let uniforms = { texture:  { type: "t", value: 0, texture: null } };
+    let vertexShader = document.getElementById( 'vertexShaderDepth' ).textContent;
+    let fragmentShader = document.getElementById( 'fragmentShaderDepth' ).textContent;
+    this.renderObject.customDepthMaterial = new THREE.ShaderMaterial( { uniforms: uniforms, vertexShader: vertexShader, fragmentShader: fragmentShader } );
 
     this.renderObject.onBeforeRender = (r, s, cam) => {
       let v = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), THREE.Math.degToRad(-this.facing));
@@ -692,12 +813,19 @@ class DTActor {
 
     let fr = this.anim.frame.bydir[dir];
     if (!fr) fr = this.anim.frame.bydir[0];
-    this.renderObject.material.map = fr.texture;
-    this.renderObject.material.needsUpdate = true;
+    let ro = this.renderObject;
+    if(ro.material.map != fr.texture) {
+      ro.material.map = fr.texture;
+      ro.material.needsUpdate = true;
 
-    let xx = fr.graphic.width / 50;
-    let yy = fr.graphic.height / 50;
-    this.renderObject.scale.set(xx, yy, 1)
+      let utx = ro.customDepthMaterial.uniforms.texture;
+      utx.value = fr.texture;
+      ro.customDepthMaterial.needsUpdate = true;
+
+      let xx = fr.graphic.width / 50;
+      let yy = fr.graphic.height / 50;
+      ro.scale.set(xx, yy, 1)
+    }
   }
 
   setAnim(anim, start = true) {
@@ -824,8 +952,71 @@ const ImpSerpBallRaws = {
   ]
 }
 
+const HKPBRaws = {
+  idleAnim: [
+    ["BOS2", "AB", 12]
+  ],
+  walkAnim: [
+    ["BOS2", "ABCD", 6, "travel"]
+  ],
+  attackAnim: [
+    ["BOS2", "EF", 8],
+    ["BOS2", "G", 6, "attack"]
+  ],
+  painAnim: [
+    ["BOS2", "H", 8, "pain"]
+  ],
+  deathAnim: [
+    ["BOS2", "I", 8],
+    ["BOS2", "J", 8, "deathscream"],
+    ["BOS2", "K", 6],
+    ["BOS2", "L", 6, "noblocking"],
+    ["BOS2", "MN", 8],
+    ["BOS2", "O", -1],
+  ]
+}
+
+const HKPBBallRaws = {
+  idleAnim: [
+    ["BAL7", "AB", 4]
+  ],
+  deathAnim: [
+    ["BAL7", "CDE", 6]
+  ]
+}
+
+const PlayerRaws = {
+  idleAnim: [
+    ["PLAY", "AB", 12]
+  ],
+  walkAnim: [
+    ["PLAY", "ABCD", 4, "travel"]
+  ],
+  attackAnim: [
+    ["PLAY", "F", 6, "attack"],
+    ["PLAY", "E", 12],
+  ],
+  painAnim: [
+    ["PLAY", "G", 8, "pain"]
+  ],
+  deathAnim: [
+    ["PLAY", "H", 10],
+    ["PLAY", "I", 10, "deathscream"],
+    ["PLAY", "J", 10, "noblocking"],
+    ["PLAY", "KLM", 10],
+    ["PLAY", "N", -1],
+  ]
+};
+
 const ActorDefs = {
-  Serpentipede: { // needs update
+  FreedoomGuy: {
+    name: "Freedoom Guy",
+    from: ["freedoom2.wad"],
+    speed: 15,
+    rawAnims: PlayerRaws,
+  },
+
+  Serpentipede: {
     name: "Serpentipede",
     from: ["freedoom2.wad"],
     speed: 15,
@@ -855,6 +1046,38 @@ const ActorDefs = {
     speed: 9,
     isProjectile: true,
     rawAnims: ImpSerpBallRaws
+  },
+
+  HellKnight: {
+    name: "Hell Knight",
+    from: ["doom2.wad"],
+    speed: 15,
+    baseAttackProjectileName: "HellKnightBall",
+    rawAnims: HKPBRaws,
+  },
+
+  HellKnightBall: {
+    name: "Hell Knight Ball",
+    from: ["doom2.wad"],
+    speed: 8,
+    isProjectile: true,
+    rawAnims: HKPBBallRaws,
+  },
+
+  PainBringer: {
+    name: "Pain Bringer",
+    from: ["freedoom2.wad"],
+    speed: 15,
+    baseAttackProjectileName: "PainBringerBall",
+    rawAnims: HKPBRaws,
+  },
+
+  PainBringerBall: {
+    name: "Pain Bringer Ball",
+    from: ["freedoom2.wad"],
+    speed: 8,
+    isProjectile: true,
+    rawAnims: HKPBBallRaws,
   }
 }
 
@@ -927,7 +1150,7 @@ const ZombieMan = {
 var g_Raycaster = new THREE.Raycaster();
 var g_MousePosition = new THREE.Vector2();
 
-let g_DoMove = false;
+let g_PlayerClicked = false;
 window.addEventListener( 'mousemove', function ( event ) {
 	// calculate mouse position in normalized device coordinates
 	// (-1 to +1) for both components
@@ -946,8 +1169,8 @@ window.addEventListener( 'mousemove', function ( event ) {
   }, false );
 
   window.addEventListener( 'mouseup', function ( event ) {
-    if (event.button == 0 && mx == event.screenX && my == event.screenY) {
-      g_DoMove = true;
+    if (event.button == 0 && Math.abs(mx - event.screenX) <= 1 && Math.abs(my - event.screenY) <= 1) {
+      g_PlayerClicked = true;
     }
   }, false );
 }
@@ -965,6 +1188,7 @@ function loadSpriteFromWad(wad, sprite, frame) {
     let lump = wad.getLumpByName(sprname + s + f);
     if (!lump) {
       switch(f) {
+      case 5: flip = true; case 1: lump = wad.getLumpByName(sprname + s + 1 + s + 5); break;
       case 8: flip = true; case 2: lump = wad.getLumpByName(sprname + s + 2 + s + 8); break;
       case 7: flip = true; case 3: lump = wad.getLumpByName(sprname + s + 3 + s + 7); break;
       case 6: flip = true; case 4: lump = wad.getLumpByName(sprname + s + 4 + s + 6); break;
@@ -1021,7 +1245,191 @@ function loadSpriteFromWad(wad, sprite, frame) {
   return results;
 }
 
-let oldIntersects = [];
+const SIDE_PLAYER = 0, SIDE_AI = 1;
+let g_CurrentSide = SIDE_PLAYER;
+
+let ui_CTHLabel = document.getElementById("CTHLabel");
+
+// let gp_TargetCTHEstimate = {
+//   checks: 0,
+//   hits: 0,
+//   actor: null,
+// };
+class CTHEstimate {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.checks = 0;
+    this.hits = 0;
+    this.friendlyHits = 0;
+    this.actor = null;
+  }
+
+  getCTH() { return this.hits / this.checks; }
+  getFriendlyCTH() { return this.friendlyHits / this.checks; }
+
+  update(attacker, victim, attackDef, samples=25) {
+    let raycaster = CTHEstimate._raycaster;
+    let intersected = CTHEstimate._intersected;
+    intersected.length = 0;
+
+    let pos = new THREE.Vector3(), dir = new THREE.Vector3();
+    for (let i = samples; i--;) {
+      getPosAndDirForAttack(attacker, victim, attackDef, pos, dir);
+      raycaster.set(pos, dir);
+
+      intersected.length = 0;
+      this.checks += 1;
+      raycaster.intersectObjects( g_World.collidables, false, intersected );
+      if (intersected.length) {
+        for (const data of intersected) {
+          const int = data.object;
+          // if (int === p.collisionObject || int === p.owner.collisionObject || (int.dtacActor && !int.dtacActor.isAlive())) continue;
+          if (int.dtacActor === attacker || (int.dtacActor && !int.dtacActor.isAlive())) continue;
+          if (int.dtacActor && int.dtacActor.side == attacker.side) this.friendlyHits += 1;
+          if (int.dtacActor === victim) this.hits += 1;
+          break;
+        }
+      }
+    }
+  }
+}
+CTHEstimate._raycaster = new THREE.Raycaster();
+CTHEstimate._intersected = [];
+const g_CTHEstimator = new CTHEstimate();
+
+function resetCTH(cth, resetLabel=true) {
+  cth.reset();
+  if (resetLabel) ui_CTHLabel.innerText = "";
+}
+
+function updateCTH(cth, attacker, victim, attackDef, updateLabel=true) {
+  cth.update(attacker, victim, attackDef)
+  if (updateLabel) ui_CTHLabel.innerText = "CTH ≈ " + Math.round(cth.getCTH() * 100) + "% (" + Math.round(cth.getFriendlyCTH() * 100) + "% friendly)";
+}
+
+function aiAct() {
+  let ai = g_World.actors.find(a => a.side == SIDE_AI && !a.acted && a.isAlive());
+  if (!ai) return;
+  ai.acted = true;
+  let tgt = g_World.actors.find(a => {
+    if (a.side != SIDE_AI && a.isAlive()) {
+      let cth = new CTHEstimate();
+      cth.update(ai, a, null, 300)
+      if (cth.getCTH() >= 0.1 && cth.getFriendlyCTH() < 0.25) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  if (tgt) {
+    g_TrackedActor = ai;
+    g_CurrentAction = doAttack(ai, tgt);
+  } else {
+    let reachables = findReachableTiles(ai.tile, 5);
+    let t = choose(reachables).tile;
+    g_TrackedActor = ai;
+    g_CurrentAction = doTravel(ai, findPath(ai.tile, t));
+  }
+}
+
+function playerSelectActor(actor) {
+  g_SelectedActor = actor;
+  g_TrackedActor = actor;
+  g_MainCameraLerping = true;
+  g_SelectedActorReachables = null;
+}
+
+let oldReachables = [];
+function playerAct() {
+  if (!g_SelectedActor || g_SelectedActor.acted || !g_SelectedActor.isAlive()) {
+    playerSelectActor(g_World.actors.find(
+      a => a.side == SIDE_PLAYER && !a.acted && a.isAlive()));
+  }
+
+  if (!g_SelectedActor) return;
+  g_TrackedActor = g_SelectedActor;
+
+  let reachables = findReachableTiles(g_SelectedActor.tile, 3);
+  for (let {tile: t} of reachables) {
+    let obj = t.walkableObject;
+    let oldMat = obj.material;
+    obj.material = walkableObjectMaterial;
+    oldReachables.push([obj, oldMat]);
+  }
+
+  let intersects = g_Raycaster.intersectObjects( g_World.pickable );
+  for (let i = 0; i < intersects.length; i++) {
+    let obj = intersects[ i ].object;
+    if (obj.dtacTile && reachables.some(r => r.tile === obj.dtacTile)) {
+      let p = findPath(g_SelectedActor.tile, obj.dtacTile);
+      // for (let t of p) {
+      //   let obj = t.walkableObject;
+      //   let oldMat = obj.material;
+      //   obj.material = walkableObjectMaterial;
+      //   oldIntersects.push([obj, oldMat]);
+      // }
+
+      if (g_PlayerClicked && p[p.length-1] == obj.dtacTile) {
+        p.shift();
+        let a = obj.dtacTile.actor;
+        if (a && a.isAlive() && a !== g_SelectedActor) {
+          g_CurrentAction = doAttack(g_SelectedActor, a);
+        } else {
+          g_CurrentAction = doTravel(g_SelectedActor, p);
+        }
+        g_SelectedActor.acted = true;
+      }
+      return;
+    } else if (obj.dtacActor && obj.dtacActor.isAlive()) {
+      let a = obj.dtacActor;
+      if (a.side == SIDE_PLAYER) {
+        showHoverCursorAt(a.position, 0x00ff00);
+        if (g_PlayerClicked) playerSelectActor(a);
+      } else if (a.isAlive()) {
+        showHoverCursorAt(a.position, 0xff0000);
+        if (g_PlayerClicked) {
+          g_CurrentAction = doAttack(g_SelectedActor, a);
+          g_SelectedActor.acted = true;
+        } else {
+          if (a !== g_CTHEstimator.actor) {
+            resetCTH(g_CTHEstimator);
+            g_CTHEstimator.actor = a;
+          }
+          updateCTH(g_CTHEstimator, g_SelectedActor, a);
+        }
+      }
+      return;
+    }
+  }
+}
+
+let g_ActorHoverCursor = (() => {
+  let box = new THREE.BoxGeometry(1, 1.2, 1);
+  box.translate(0, 0.6, 0);
+  let geom = new THREE.EdgesGeometry( box );
+  let mat = new THREE.LineBasicMaterial({color: 0x00ff00, linewidth: 3, transparent: true, opacity: 0.25});
+  mat.needsUpdate = true;
+  return new THREE.LineSegments(geom, mat);
+})();
+
+function hideHoverCursor() {
+  g_ActorHoverCursor.visible = false;
+}
+
+function showHoverCursorAt(position, colorHex) {
+  g_ActorHoverCursor.visible = true;
+  g_ActorHoverCursor.position.copy(position);
+  if (colorHex !== undefined) g_ActorHoverCursor.material.color.set(colorHex);
+}
+
+let g_SelectedActor;
+let g_TrackedActor;
+let g_MainCameraLerping = false;
+let g_TurnCount = 0;
 function mainLoop(currentTime) {
   let dt = (this.lastCurrentTime ? currentTime - this.lastCurrentTime : 0) / 1000.0;
   this.lastCurrentTime = currentTime;
@@ -1029,47 +1437,44 @@ function mainLoop(currentTime) {
 
   g_Raycaster.setFromCamera( g_MousePosition, g_MainCamera );
 
-  for (let [obj, oldMat] of oldIntersects) {
+  for (let [obj, oldMat] of oldReachables) {
     obj.material = oldMat;
   }
+  oldReachables.length = 0;
+  hideHoverCursor();
 
   if (g_CurrentAction) {
+    resetCTH(g_CTHEstimator);
     let r = g_CurrentAction.next(dt);
     if (r.done) g_CurrentAction = null;
   } else {
-    oldIntersects = [];
-    // calculate objects intersecting the picking ray
-    let intersects = g_Raycaster.intersectObjects( g_World.walkable );
-    for ( let i = 0;
-          i < intersects.length && 1;
-          i++ ) {
-
-      let obj = intersects[ i ].object;
-      if (!obj.dtacTile) continue;
-
-      let p = findPath(g_TestActor.tile, obj.dtacTile);
-      for (let t of p) {
-        let obj = t.walkableObject;
-        let oldMat = obj.material;
-        obj.material = walkableObjectMaterial;
-        oldIntersects.push([obj, oldMat]);
-      }
-
-      if (g_DoMove && p[p.length-1] == obj.dtacTile) {
-        p.shift();
-        let a = obj.dtacTile.actor;
-        if (a && a.isAlive() && a !== g_TestActor) {
-          g_CurrentAction = doAttack(g_TestActor, a);
-        } else {
-          g_CurrentAction = doTravel(g_TestActor, p);
-        }
+    let allActed = true;
+    for (let a of g_World.actors) {
+      if (!a.isProjectile && a.side == g_CurrentSide && a.isAlive() && !a.acted) {
+        allActed = false;
+        break;
       }
     }
-  }
-  g_DoMove = false;
 
-  if (this.lerping || g_CurrentAction) {
-    this.lerping = true;
+    if (allActed) {
+      g_TurnCount += 1;
+      g_CurrentSide = g_CurrentSide === SIDE_PLAYER ? SIDE_AI : SIDE_PLAYER;
+
+      for (let a of g_World.actors) {
+        a.acted = false;
+      }
+    }
+
+    if (g_CurrentSide == SIDE_AI) {
+      aiAct();
+    } else {
+      playerAct();
+    }
+  }
+  g_PlayerClicked = false;
+
+  if (g_MainCameraLerping || g_CurrentAction) {
+    g_MainCameraLerping = true;
 
     const PAN = 8, ROTATE = 3;
     const camState = g_MainCameraControls.getState();
@@ -1077,21 +1482,25 @@ function mainLoop(currentTime) {
     if (this.initOffset === undefined || g_MainCameraControlsZoomChanged || camState & ROTATE) {
       this.initOffset = g_MainCamera.position.clone().sub(g_MainCameraControls.target)
     };
-    g_MainCameraControls.target.lerp(g_TestActor.object.position, 0.05);
-    let t = g_TestActor.object.position.clone();
+
+    //let p = g_SelectedActor && g_SelectedActor.isAlive() ? g_SelectedActor.object.position.clone() : new THREE.Vector3();
+    let a = g_TrackedActor || g_SelectedActor;
+    let p = a ? a.object.position.clone() : new THREE.Vector3();
+    if (a && a.actordef.isProjectile) p.y -= 0.5;
+    g_MainCameraControls.target.lerp(p, 0.05);
+    let t = p.clone();
     t.add(this.initOffset);
     g_MainCamera.position.lerp(t, 0.05);
     if (camState & PAN || almostEqual(g_MainCamera.position, t, 0.1)) {
-      this.lerping = false;
+      g_MainCameraLerping = false;
       this.initOffset = undefined;
     };
   }
+
   g_MainCameraControlsZoomChanged = false;
   g_MainCameraControls.update();
 
-  g_World.actors.forEach(actor => {
-    actor.update(dt);
-  })
+  g_World.actors.forEach(actor => actor.update(dt));
 
 	g_Renderer.render( g_World.scene, g_MainCamera );
 }
