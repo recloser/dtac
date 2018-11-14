@@ -1,4 +1,6 @@
 const PriorityQueue = require("js-priority-queue");
+const {Keys} = require("./keys.js");
+const {degToRad, radToDeg} = THREE.Math;
 
 function choose(x) {
   let y = x;
@@ -10,8 +12,8 @@ function almostEqual(a, b, eps=0.001) {
   return Math.abs(a.x - b.x) <= eps && Math.abs(a.y - b.y) <= eps && Math.abs(a.z - b.z) <= eps
 }
 
-function randomBetween(min, max) {
-  return min + Math.random() * (max - min);
+function randomBetween(min, maxExclusive) {
+  return min + Math.random() * (maxExclusive - min);
 }
 
 function swapRemove(array, thing) {
@@ -34,7 +36,6 @@ let g_Renderer;
 let g_World;
 let g_MainCamera;
 let g_MainCameraControls, g_MainCameraControlsZoomChanged;
-let g_TestActor;
 let g_CurrentAction;
 
 const Resources = {
@@ -77,7 +78,7 @@ function start() {
       return Resources.loadWadFromURL("doom.wad");
     },
     function() {
-      let err = "Couldn't load base wad! (" + BASE_WAD + ")";
+      let err = `Couldn't load base wad! ( + ${BASE_WAD} + )`;
       console.error(err);
       document.body.appendChild(err);
     }
@@ -94,6 +95,7 @@ function start() {
       document.body.appendChild( renderer.domElement );
 
       prepareActorDefs();
+      initTileModelDefs();
 
       g_World = new DTWorld();
       g_MainCamera = new THREE.PerspectiveCamera( 20, window.innerWidth / window.innerHeight, 0.1, 1000 );
@@ -120,14 +122,14 @@ start();
 class DTWadResource {
   constructor(wadjs) {
     this.wadjs = wadjs;
-    this.flats = [];
+    this.graphics = [];
     this.sprites = [];
   }
 
-  getFlat(name) {
-    let f = this.flats[name];
+  getGraphic(name) {
+    let f = this.graphics[name];
     if (!f) {
-      f = this.flats[name] = new DTDoomFlat(this, name);
+      f = this.graphics[name] = new DTDoomGraphic(this, name);
     }
 
     return f;
@@ -250,20 +252,256 @@ class DTDoomSpriteAnim {
   }
 }
 
-class DTDoomFlat {
+class DTDoomGraphic {
   constructor(wadres, flatname) {
     let wad = wadres.wadjs;
-    let flat = Object.create(Flat);
-    let flatLump = wad.getLumpByName(flatname);
+    let idx = wad.getLumpIndexByName(flatname);
+    let type = wad.detectLumpType(idx) ;
+    let flat = type == "flat" ? Object.create(Flat) : Object.create(Graphic);
+    let flatLump = wad.getLump(idx);;
     flat.load(flatLump);
     let c = flat.toCanvas(wad);
     let tx = new THREE.CanvasTexture(c);
+    tx.wrapS = THREE.RepeatWrapping;
+    tx.wrapT = THREE.RepeatWrapping;
     tx.anisotropy = g_Renderer.getMaxAnisotropy();
     tx.magFilter = THREE.NearestFilter;
     tx.needsUpdate = true;
     this.texture = tx;
   }
 }
+
+function texMat(textureName) {
+  return new THREE.MeshLambertMaterial({
+    map: Resources.wads[BASE_WAD].getGraphic(textureName).texture,
+    side: THREE.DoubleSide,
+  })
+}
+
+const NORTH = 0, EAST = 1, SOUTH = 2, WEST = 3, MAX_DIR = WEST;
+const ROT0 = 0, ROT90 = 1, ROT180 = 2, ROT270 = 3, MAX_ROT = ROT270;
+function ROTtoRads(rot) {
+  switch(rot) {
+    case ROT0: return degToRad(0);
+    case ROT90: return degToRad(-90);
+    case ROT180: return degToRad(-180);
+    case ROT270: return degToRad(-270);
+    default: throw "Invalid rot: " + rot;
+  }
+}
+function rotDir(rot, dir) {
+  if (rot < ROT0 || rot > MAX_ROT) throw "Invalid rot " + rot;
+  if (dir < NORTH || dir > MAX_DIR) throw "Invalid dir " + dir;
+  dir += rot;
+  return dir % (MAX_DIR+1);
+}
+
+function Quarter4() {
+  let g = new THREE.Geometry();
+  let p = Quarter1();
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  return g;
+}
+function Quarter1() {
+  return new THREE.PlaneGeometry(1.0, 0.25).translate(0.0, 0.125, -0.5);
+}
+
+function Full4() {
+  let g = new THREE.Geometry();
+  let p = Full1();
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  return g;
+}
+function Full1() {
+  return new THREE.PlaneGeometry(1.0, 1.0).translate(0.0, 0.5, -0.5);
+}
+
+function Tall4() {
+  let g = new THREE.Geometry();
+  let p = Tall1();
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  return g;
+}
+function Tall1() {
+  return new THREE.PlaneGeometry(1.0, 2.0).translate(0.0, 0.125, -0.5);
+}
+
+function FloorGeom() {
+  return new THREE.PlaneGeometry(1, 1).rotateX(degToRad(-90));
+}
+
+const ALLDIRS = [NORTH, EAST, SOUTH, WEST];
+const TileModelDefs = {
+  FloorHexes: {
+    geom: FloorGeom(),
+    matn: "FLOOR4_8",
+    walkable: true
+  },
+  FloorHexesMoss: {
+    geom: FloorGeom(),
+    matn: "FLOOR5_1",
+    walkable: true
+  },
+  FloorHexesTan1: {
+    geom: FloorGeom(),
+    matn: "FLOOR5_2",
+    walkable: true
+  },
+  FloorHexesTan2: {
+    geom: FloorGeom(),
+    matn: "FLOOR5_3",
+    walkable: true
+  },
+  FloorBlue: {
+    geom: FloorGeom(),
+    matn: "FLAT14",
+    walkable: true
+  },
+  FloorRusyGrid: {
+    geom: FloorGeom(),
+    matn: "AQF049",
+    walkable: true
+  },
+  FloorConcreteTiles: {
+    geom: FloorGeom(),
+    matn: "AQF051",
+    walkable: true
+  },
+  FloorHexaRust: {
+    geom: FloorGeom(),
+    matn: "AQF074",
+    walkable: true
+  },
+  FloorConcreteStripes: {
+    geom: FloorGeom(),
+    matn: "AQF068",
+    walkable: true
+  },
+  FloorStripes: {
+    geom: FloorGeom(),
+    matn: "AQF019",
+    walkable: true
+  },
+  FloorStripesBars: {
+    geom: FloorGeom(),
+    matn: "AQF018",
+    walkable: true
+  },
+
+  BrownFullWall1: {
+    geom: Full1(),
+    scaleS: 1.0,
+    scaleT: 0.25,
+    matn: "WALL03_4",
+    blocks: [SOUTH]
+  },
+  BrownFullWall4: {
+    geom: Full4(),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: "WALL03_4",
+    blocks: [SOUTH]
+  },
+
+  CompsHalfSide: {
+    geom: new THREE.BoxGeometry(1.0, 0.5, 0.25).translate(0.0, 0.25, 0.5),
+    scaleS: 2.0,
+    scaleT: 1.0,
+    matn: "COMP02_3",
+    blocks: [SOUTH]
+  },
+  CompsTall1: {
+    geom: new THREE.BoxGeometry(1.0, 2.0, 1).translate(0.0, 1.0, 0.0),
+    scaleS: 1.0,
+    scaleT: 2.0,
+    matn: "COMP02_3",
+    blocks: ALLDIRS
+  },
+  CompsTall4: {
+    geom: new THREE.BoxGeometry(1.0, 2.0, 1).translate(0.0, 1.0, 0.0),
+    scaleS: 1.0,
+    scaleT: 2.0,
+    matn: "COMP02_3",
+    blocks: ALLDIRS
+  },
+
+  RustyQuarter1: {
+    geom: Quarter1(),
+    scaleS: 1.0,
+    scaleT: 0.25,
+    matn: "RW10_2",
+    blocks: [SOUTH]
+  },
+  RustyQuarter4: {
+    geom: Quarter4(),
+    scaleS: 1.0,
+    scaleT: 0.25,
+    matn: "RW10_2",
+    blocks: ALLDIRS
+  }
+}
+
+function initTileModelDefs() {
+  let scale = new THREE.Vector2();
+  for (let td in TileModelDefs) {
+    let t = TileModelDefs[td];
+    scale.set(t.scaleS || 1.0, t.scaleT || 1.0);
+    for (let uvs of t.geom.faceVertexUvs[0]) {
+      uvs[0].multiply(scale);
+      uvs[1].multiply(scale);
+      uvs[2].multiply(scale);
+    }
+    t.geom.uvsNeedUpdate = true;
+    t.mat = texMat(t.matn);
+  }
+
+  let tdp = document.querySelector("#TileDefPicker");
+  if (tdp) {
+    for (let td in TileModelDefs) {
+      let el = document.createElement("div");
+      el.className = "TileDefChoice";
+      el.innerText = td;
+      el.onclick = () => selectTileDef(td);
+      tdp.appendChild(el);
+    }
+  } else {
+    console.error("TDP not found?");
+  }
+}
+
+// const MapDef = {
+//   tiles: {
+//     XYZtoID(0, 0, 0): {
+//     x: 0,
+//     y: 0,
+//     z: 0,
+//     parts: [
+//       {def: TileDefs.FloorHexes, rotationY: 0},
+//       {def: TileDefs.HalfSideComps, rotationY: ROT90},
+//     ],
+//     things: [
+//       {type: "spawn", what: "DoomImp"},
+//     ]
+//   }]
+// }
 
 class DTTileModel {
   constructor(geom, material, walkableGeom) {
@@ -285,15 +523,19 @@ function moveTowards(from, to, step) {
   }
 }
 
+function callCombined(gens, dt) {
+  let newgens = [];
+  for (let g of gens) {
+    let r = g.next(dt);
+    if (!r.done) newgens.push(g);
+  }
+  return newgens;
+}
+
 function* doCombined(...gens) {
   while(gens.length != 0) {
     let dt = yield;
-    let newgens = [];
-    for (let g of gens) {
-      let r = g.next(dt);
-      if (!r.done) newgens.push(g);
-    }
-    gens = newgens;
+    gens = callCombined(gens, dt)
   }
 }
 
@@ -355,10 +597,11 @@ function* doFaceTowards(actor, position, degsPerSecond) {
 const DEFAULT_ROTATION_SPEED = 360;
 
 function spawnProjectile(def, owner, at, dir) {
-  let p = new DTActor(def);
+  let p = new DTActor(ActorDefs[def.projectile]);
   p.owner = owner;
   p.setPosition(at);
   p.setTravelDirection(dir);
+  p.attackdef = def;
   g_World.addActor(p);
   faceTowards(p, p.position.clone().add(dir));
   return p;
@@ -391,7 +634,7 @@ function* doProcessProjectile(p) {
         hitSomething = true;
         const a = int.dtacActor;
         if (a && !a.isProjectile && a != p.owner) {
-          a.hurt(p.damage, p);
+          a.hurt(p.attackdef.damage.roll(), p);
         }
       }
       if (hitSomething) p.die();
@@ -412,37 +655,69 @@ function* startAnimAndWaitForEvent(anim, eventName) {
 function getPosAndDirForAttack(actor, victim, attackDef, pos, dir) {
   let ret = !(pos && dir);
   pos = pos ? pos.copy(actor.position) : actor.position.clone();
-  pos.y += 0.5;
+  pos.y += 0.75;
   dir = (dir ? dir.copy(victim.position) : victim.position.clone()).sub(pos);
-  dir.y += 0.5;
+  dir.y += 0.75;
   dir.normalize();
 
-  let mx = new THREE.Matrix4().lookAt(dir, new THREE.Vector3(0,0,0), new THREE.Vector3(0,1,0));
+  let mx = getPosAndDirForAttack.mx.lookAt(dir, new THREE.Vector3(0,0,0), new THREE.Vector3(0,1,0));
   dir.set(0, 0, 1);
-  dir.applyEuler(new THREE.Euler(0, THREE.Math.degToRad(randomBetween(-8, 8)), 0));
+  let {horizontalSpread: hs, verticalSpread: vs} = attackDef;
+  dir.applyEuler(new THREE.Euler(
+    THREE.Math.degToRad(randomBetween(-vs, vs+1)),
+    THREE.Math.degToRad(randomBetween(-hs, hs+1)),
+    0));
   dir.applyMatrix4(mx);
 
   pos.add(dir.clone().multiplyScalar(0.25));
 
   if (ret) return [pos, dir];
 }
+getPosAndDirForAttack.mx = new THREE.Matrix4();
+
+function* doWait(time) {
+  while(time > 0) time -= yield;
+}
 
 function* doAttack(actor, victim, attackDef) {
   if (actor === victim) {
-    console.error("An actor can attack itself");
+    console.error("An actor can't attack itself");
     return;
   }
   yield* doFaceTowards(actor, victim.position, DEFAULT_ROTATION_SPEED);
-  actor.playAnim("attackAnim", false);
+  //actor.playAnim("attackAnim", false);
 
-  yield* startAnimAndWaitForEvent(actor.anim, "attack");
+  let projectiles = [];
+  let trackProjectile = (attackDef.shots == 1 && attackDef.bulletsPerShot == 1)
+  if (!trackProjectile) g_TrackedActor = victim;
+  let waitingForFinish = false;
+  for (let shot = 0; shot < attackDef.shots; shot++) {
+    while (waitingForFinish) {
+      let dt = yield;
+      projectiles = callCombined(projectiles, dt);
+    }
+    if (attackDef.shots != 1 && actor.hasAnim("attackAnimBurst")) actor.playAnim("attackAnimBurst", false);
+    else actor.playAnim("attackAnim", false);
+    let waiting = true;
+    waitingForFinish = true;
+    actor.anim.events.on("attack", () => waiting = false, true);
+    actor.anim.events.on("finished", () => waitingForFinish = false, true);
+    actor.anim.start();
+    while (waiting) {
+      let dt = yield;
+      projectiles = callCombined(projectiles, dt);
+    }
 
-  let [pos, dir] = getPosAndDirForAttack(actor, victim, attackDef);
+    for (let bullet = 0; bullet < attackDef.bulletsPerShot; bullet++) {
+      let [pos, dir] = getPosAndDirForAttack(actor, victim, attackDef);
 
-  let projDef = ActorDefs[actor.actordef.baseAttackProjectileName];
-  let p = spawnProjectile(projDef, actor, pos, dir);
-  g_TrackedActor = p;
-  yield* doProcessProjectile(p);
+      let p = spawnProjectile(attackDef, actor, pos, dir);
+      if (trackProjectile) g_TrackedActor = p;
+      projectiles.push(doProcessProjectile(p));
+    }
+  }
+  yield* doCombined(...projectiles);
+  yield* doWait(0.8);
 }
 
 function* doTravel(actor, path) {
@@ -450,7 +725,7 @@ function* doTravel(actor, path) {
   for (let tile of path) {
     if (tile === actor.tile) continue;
     let tpos = tile.position.clone();
-    tpos.y += 0.5;
+    // tpos.y += 0.5;
     yield* doCombined(
       doFaceTowards(actor, tpos, DEFAULT_ROTATION_SPEED),
       doMoveTowards(actor.object.position, tpos, 4)
@@ -463,29 +738,69 @@ function* doTravel(actor, path) {
 const walkableObjectMaterialTest = new THREE.MeshLambertMaterial({color: 0x00ffff, transparent: true, opacity: 0.25})
 const walkableObjectMaterial = new THREE.MeshLambertMaterial({color: 0xffff00, transparent: true, opacity: 0.25})
 const walkableObjectMaterialInvisible = new THREE.MeshLambertMaterial({color: 0x00ffff, visible: false})
+const TILE_X = 1.0, TILE_Y = 0.25, TILE_Z = 1.0;
 class DTTile {
-  constructor(model, x, y, z) {
-    this.renderObject = new THREE.Mesh(model.geom, model.material)
-    this.renderObject.dtacTile = this;
-    if (model.walkableGeom) {
-      this.walkableObject = new THREE.Mesh(model.walkableGeom, walkableObjectMaterialInvisible);
-      this.walkableObject.dtacTile = this;
-    }
+  constructor(tiledef, x, y, z) {
+    let {parts, things} = tiledef;
+
     this.object = new THREE.Group();
-    this.object.add(this.renderObject);
+
+    this.blocked = [];
+
+    this.renderObjects = [];
+    this.walkableObjects = [];
+    for (let part of parts) {
+      let tmd = TileModelDefs[part.def];
+      let rot = "rotationY" in part ? part.rotationY : ROT0;
+      let r = ROTtoRads(rot);
+      for (let blockDir of tmd.blocks || []) {
+        let d = rotDir(rot, blockDir);
+        if (this.blocked.indexOf(d) == -1) this.blocked.push(d);
+      }
+      let renderObject = new THREE.Mesh(tmd.geom, tmd.mat);
+      renderObject.rotateY(r);
+      renderObject.dtacTile = this;
+      this.renderObjects.push(renderObject);
+      // if (tiledef.walkableGeom) {
+      if (tmd.walkable) {
+        // walkableObject = new THREE.Mesh(tiledef.walkableGeom, walkableObjectMaterialInvisible);
+        let walkableObject = new THREE.Mesh(tmd.geom, walkableObjectMaterialInvisible);
+        walkableObject.rotateY(r);
+        walkableObject.position.y += 0.01;
+        walkableObject.dtacTile = this;
+        this.walkableObjects.push(walkableObject);
+      }
+    }
+
+    for (let ro of this.renderObjects) this.object.add(ro);
     this.object.dtacTile = this;
-    if (this.walkableObject) this.object.add(this.walkableObject);
+    for (let wo of this.walkableObjects) this.object.add(wo);
 
     this.links = [];
+    this.setPosition(x, y, z);
 
-    this.object.position.set(x, y, z);
-    this.position = new THREE.Vector3(x, y, z);
-    this.id = XYZtoID(x, 0, z);
+    // this.position = new THREE.Vector3(x, y, z);
+    this.id = XYZtoID(x, y, z);
   }
+
+  setPosition(x, y, z) { this.object.position.set(x * TILE_X, y * TILE_Y, z * TILE_Z); }
+  get position() { return this.object.position; }
+
+  blocks(dir) { return this.blocked.indexOf(dir) !== -1; }
 
   addTwoWayLink(other) {
     if (this.links.indexOf(other) == -1) this.links.push(other);
     if (other.links.indexOf(this) == -1) other.links.push(this);
+  }
+
+  get walkable() { return this.walkableObjects.length != 0; }
+
+  removeAllLinks() {
+    for (let other of this.links) {
+      swapRemove(other.links, this);
+    }
+
+    this.links.length = 0;
   }
 
   distanceTo(other) {
@@ -591,8 +906,30 @@ function findPath(from, to) {
   return [];
 }
 
+function makePlainMapDef(width, height) {
+  let tiles = {};
+  let mapdef = {width, height, tiles};
+
+  for (let x = 0; x < width; x++) {
+    for (let z = 0; z < height; z++) {
+      let t = {
+        x: x,
+        y: 0,
+        z: z,
+        parts: [
+          {def: "FloorHexes", rotationY: 0},
+        ],
+        things: []
+      }
+      tiles[XYZtoID(x, 0, z)] = t;
+    }
+  }
+
+  return mapdef;
+}
+
 class DTWorld {
-  constructor() {
+  constructor(mapdef = makePlainMapDef(16, 16)) {
     this.grid = [];
     this.tiles = [];
     this.walkable = [];
@@ -600,53 +937,10 @@ class DTWorld {
     this.collidables = [];
     this.actors = [];
     let scene = this.scene = new THREE.Scene();
+    this.mapdef = mapdef;
     scene.add(g_ActorHoverCursor); // oops
 
-    // let qweqeq = {
-    //   id: [1, 0, 1],
-    //   walkable: true,
-    //   links: [[2, 0, 1]],
-    //   model: "Box"
-    // }
-
-    let plane = new THREE.PlaneGeometry();
-    plane.rotateX(THREE.Math.degToRad(-90));
-    plane.translate(0, 0.51, 0);
-    let basic = new DTTileModel(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshLambertMaterial({map: Resources.wads[BASE_WAD].getFlat("FLOOR4_8").texture}),
-      plane,
-    )
-
-    for (let z = 0; z < 16; z++) {
-      for (let x = 0; x < 16; x++) {
-        let t = new DTTile(basic, x, 0, z);
-        this.tiles.push(t);
-        this.collidables.push(t.renderObject)
-        if (t.walkableObject) {
-          this.walkable.push(t.walkableObject);
-          this.pickable.push(t.walkableObject);
-        }
-        this.scene.add(t.object);
-        this.grid[XYZtoID(x, 0, z)] = t;
-      }
-    }
-
-    for (let z = 0; z < 16; z++) {
-      for (let x = 0; x < 16; x++) {
-        let g = this.grid;
-        let t = g[XYZtoID(x, 0, z)], o;
-        // if (o = g[XYZtoID(x - 1, 0, z)]) t.addTwoWayLink(o);
-        // if (o = g[XYZtoID(x + 1, 0, z)]) t.addTwoWayLink(o);
-        // if (o = g[XYZtoID(x, 0, z - 1)]) t.addTwoWayLink(o);
-        // if (o = g[XYZtoID(x, 0, z + 1)]) t.addTwoWayLink(o);
-        for (let zd = -1; zd <= 1; zd++) {
-          for (let xd = -1; xd <= 1; xd++) {
-            if ((o = g[XYZtoID(x + xd, 0, z + zd)]) && o !== t) t.addTwoWayLink(o);
-          }
-        }
-      }
-    }
+    this.initMap();
 
     let ambientLight = new THREE.AmbientLight( 0xffffff, 0.5 );
     scene.add(ambientLight)
@@ -674,6 +968,11 @@ class DTWorld {
       actor.side = SIDE_PLAYER;
       actor.setTile(this.tileAt(8, 0, 2));
       this.addActor(actor);
+
+      actor = new DTActor(ActorDefs.DoomGuy.resourcesFound ? ActorDefs.DoomGuy : ActorDefs.FreedoomGuy);
+      actor.side = SIDE_PLAYER;
+      actor.setTile(this.tileAt(10, 0, 2));
+      this.addActor(actor);
     }
 
     let enemydef = ActorDefs.Serpentipede;
@@ -699,6 +998,62 @@ class DTWorld {
       this.bbox.expandByObject(tile.object);
     }
     this.bbox.expandByPoint(new THREE.Vector3(0, 20, 0));
+  }
+
+  initMap() {
+    for (let z = 0; z < this.mapdef.height; z++) {
+      for (let x = 0; x < this.mapdef.width; x++) {
+        let tiledef = this.mapdef.tiles[XYZtoID(x, 0, z)];
+        this.setTileFromDef(x, 0, z, tiledef);
+      }
+    }
+
+    let g = this.grid;
+    for (let z = 0; z < this.mapdef.height; z++) {
+      for (let x = 0; x < this.mapdef.width; x++) {
+        this.createTileLinks(x, 0, z);
+      }
+    }
+  }
+
+  createTileLinks(x, y, z) {
+    let g = this.grid;
+    let t = g[XYZtoID(x, y, z)], o;
+    if (!t.walkable) return;
+    for (let yd = -1; yd <= 1; yd++) {
+      if ((o = g[XYZtoID(x - 1, y + yd, z)]) && !t.blocks(WEST) && !o.blocks(EAST)) t.addTwoWayLink(o);
+      if ((o = g[XYZtoID(x + 1, y + yd, z)]) && !t.blocks(EAST) && !o.blocks(WEST)) t.addTwoWayLink(o);
+      if ((o = g[XYZtoID(x, y + yd, z - 1)]) && !t.blocks(NORTH) && !o.blocks(SOUTH)) t.addTwoWayLink(o);
+      if ((o = g[XYZtoID(x, y + yd, z + 1)]) && !t.blocks(SOUTH) && !o.blocks(NORTH)) t.addTwoWayLink(o);
+    }
+  }
+
+  setTileFromDef(x, y, z, tiledef) {
+    let old = this.grid[XYZtoID(x, y, z)];
+    if (old) {
+      old.removeAllLinks();
+      swapRemove(this.tiles, old);
+      for (let ro of old.renderObjects) swapRemove(this.collidables, ro);
+      for (let wo of old.walkableObjects) {
+        swapRemove(this.walkable, wo);
+        swapRemove(this.pickable, wo);
+      }
+      this.scene.remove(old.object);
+    }
+
+    let t = new DTTile(tiledef, x, y, z);
+    this.tiles.push(t);
+    for (let ro of t.renderObjects) this.collidables.push(ro)
+    for (let wo of t.walkableObjects) {
+      this.walkable.push(wo);
+      this.pickable.push(wo);
+    }
+    this.scene.add(t.object);
+    this.grid[XYZtoID(x, y, z)] = t;
+
+    if (old && old.actor) {
+      old.actor.setTile(t);
+    }
   }
 
   isWithinBounds(position) {
@@ -732,9 +1087,11 @@ class DTWorld {
   }
 }
 
+const ACTOR_EYES = 0.75;
+const ACTOR_OFFSET = 0.0;
 const ActorCollisionGeom = new THREE.CylinderGeometry(0.4, 0.4, 1, 8, 1);
 { ActorCollisionGeom.translate(0, 0.5, 0); }
-const ActorCollisionMaterial = new THREE.MeshBasicMaterial({color: 0xff00ff, wireframe: true, visible: false});
+const ActorCollisionMaterial = new THREE.MeshBasicMaterial({color: 0xff00ff, wireframe: true, visible: true});
 class DTActor {
   constructor(actordef) {
     this._dead = false;
@@ -760,14 +1117,14 @@ class DTActor {
 
     this.facing = 0;
     let facingDir = new THREE.Vector3( 0, 0, 1 );
-    let facingArrow = new THREE.ArrowHelper(facingDir, new THREE.Vector3(0, 0.5, 0), 0.5);
+    let facingArrow = new THREE.ArrowHelper(facingDir, new THREE.Vector3(0, 0, 0), 0.5);
 
     this.object = new THREE.Group();
     this.object.dtacActor = this;
     this.object.add(this.renderObject);
     if (this.collisionObject) this.object.add(this.collisionObject);
     this.object.add(facingArrow);
-    this.object.translateY(0.5);
+    this.object.translateY(ACTOR_OFFSET);
 
     this.playAnim("idleAnim");
 
@@ -786,10 +1143,14 @@ class DTActor {
   }
 
   update(dt) {
-    this.anim.advance(dt);
     if (this.anim.isFinished()) {
-      this.playAnim("idleAnim");
+      if (this.anim.name == "walkAnim") {
+        this.playAnim("walkAnim");
+      } else {
+        this.playAnim("idleAnim");
+      }
     }
+    this.anim.advance(dt);
 
     if (!this.isAlive()) {
       let playingDeath = this.anim && (this.anim.name == "deathAnim" || this.anim.name == "deathAnimX");
@@ -857,7 +1218,7 @@ class DTActor {
 
     if (this.tile && warpTo) {
       const {x, y, z} = tile.position;
-      this.setPosition(x, y + 0.5, z);
+      this.setPosition(x, y, z);
     }
   }
 
@@ -917,7 +1278,7 @@ const ImpSerpRaws = {
     ["TROO", "AB", 15]
   ],
   walkAnim: [
-    ["TROO", "ABCD", 7, "travel"]
+    ["TROO", "ABCD", 4, "travel"]
   ],
   attackAnim: [
     ["TROO", "EF", 8],
@@ -957,7 +1318,7 @@ const HKPBRaws = {
     ["BOS2", "AB", 12]
   ],
   walkAnim: [
-    ["BOS2", "ABCD", 6, "travel"]
+    ["BOS2", "ABCD", 4, "travel"]
   ],
   attackAnim: [
     ["BOS2", "EF", 8],
@@ -993,8 +1354,13 @@ const PlayerRaws = {
     ["PLAY", "ABCD", 4, "travel"]
   ],
   attackAnim: [
-    ["PLAY", "F", 6, "attack"],
-    ["PLAY", "E", 12],
+    ["PLAY", "E", 8],
+    ["PLAY", "F", 8, "attack"],
+    ["PLAY", "E", 8],
+  ],
+  attackAnimBurst: [
+    ["PLAY", "E", 4],
+    ["PLAY", "F", 4, "attack"],
   ],
   painAnim: [
     ["PLAY", "G", 8, "pain"]
@@ -1008,12 +1374,125 @@ const PlayerRaws = {
   ]
 };
 
+class DiceRoll {
+  constructor(times, sides, bonus=0) {
+    this.times = times;
+    this.sides = sides;
+    this.bonus = bonus;
+  }
+
+  roll() {
+    let result = 0;
+    for (let i = this.times; i--;) {
+      result += randomBetween(1, this.sides+1)
+    }
+    return result + this.bonus;
+  }
+}
+
+class UniformRoll {
+  constructor(from, to, bonus=0) {
+    this.from = from;
+    this.to = to;
+    this.bonus = bonus;
+  }
+
+  roll() {
+    return randomBetween(this.from, this.to + 1) + this.bonus
+  }
+}
+
+const Weapons = {
+  Shotgun: {
+    name: "Shotgun",
+    projectile: "GenericBullet",
+    horizontalSpread: 12,
+    verticalSpread: 3,
+    damage: new UniformRoll(3, 5),
+    bulletsPerShot: 5,
+    shots: 1,
+  },
+  Minigun: {
+    name: "Minigun",
+    projectile: "GenericBullet",
+    horizontalSpread: 8,
+    verticalSpread: 8,
+    damage: new UniformRoll(3, 5),
+    bulletsPerShot: 1,
+    shots: 8,
+  },
+  Rifle: {
+    name: "Rifle",
+    projectile: "GenericBullet",
+    horizontalSpread: 5,
+    verticalSpread: 5,
+    damage: new UniformRoll(3, 5),
+    bulletsPerShot: 1,
+    shots: 1,
+  },
+  ImpBall: {
+    name: "Imp Ball",
+    projectile: "ImpBall",
+    horizontalSpread: 7,
+    verticalSpread: 3,
+    damage: new UniformRoll(3, 5),
+    bulletsPerShot: 1,
+    shots: 1,
+  },
+  SerpentipedeBall: {
+    name: "Serpentipede Ball",
+    projectile: "SerpentipedeBall",
+    horizontalSpread: 7,
+    verticalSpread: 3,
+    damage: new UniformRoll(3, 5),
+    bulletsPerShot: 1,
+    shots: 1,
+  },
+  HellKnightBall: {
+    name: "Hell Knight Ball",
+    projectile: "HellKnightBall",
+    horizontalSpread: 7,
+    verticalSpread: 3,
+    damage: new UniformRoll(3, 5),
+    bulletsPerShot: 1,
+    shots: 1,
+  },
+  PainBringerBall: {
+    name: "Pain Bringer Ball",
+    projectile: "PainBringerBall",
+    horizontalSpread: 7,
+    verticalSpread: 3,
+    damage: new UniformRoll(3, 5),
+    bulletsPerShot: 1,
+    shots: 1,
+  },
+  PinkyBite: {
+    name: "Bite",
+    projectile: null,
+    isMelee: true,
+    damage: new UniformRoll(3, 5),
+  }
+}
+
 const ActorDefs = {
   FreedoomGuy: {
     name: "Freedoom Guy",
     from: ["freedoom2.wad"],
     speed: 15,
     rawAnims: PlayerRaws,
+    weapons: [
+      Weapons.Minigun
+    ]
+  },
+
+  DoomGuy: {
+    name: "Doom Guy",
+    from: ["doom.wad", "doom2.wad"],
+    speed: 15,
+    rawAnims: PlayerRaws,
+    weapons: [
+      Weapons.Shotgun
+    ]
   },
 
   Serpentipede: {
@@ -1021,7 +1500,9 @@ const ActorDefs = {
     from: ["freedoom2.wad"],
     speed: 15,
     rawAnims: ImpSerpRaws,
-    baseAttackProjectileName: "SerpentipedeBall"
+    weapons: [
+      Weapons.SerpentipedeBall
+    ],
   },
 
   SerpentipedeBall: {
@@ -1037,7 +1518,9 @@ const ActorDefs = {
     from: ["doom.wad", "doom2.wad"],
     speed: 15,
     rawAnims: ImpSerpRaws,
-    baseAttackProjectileName: "ImpBall"
+    weapons: [
+      Weapons.ImpBall
+    ],
   },
 
   ImpBall: {
@@ -1052,7 +1535,9 @@ const ActorDefs = {
     name: "Hell Knight",
     from: ["doom2.wad"],
     speed: 15,
-    baseAttackProjectileName: "HellKnightBall",
+    weapons: [
+      Weapons.HellKnightBall
+    ],
     rawAnims: HKPBRaws,
   },
 
@@ -1068,7 +1553,9 @@ const ActorDefs = {
     name: "Pain Bringer",
     from: ["freedoom2.wad"],
     speed: 15,
-    baseAttackProjectileName: "PainBringerBall",
+    weapons: [
+      Weapons.PainBringerBall
+    ],
     rawAnims: HKPBRaws,
   },
 
@@ -1078,6 +1565,14 @@ const ActorDefs = {
     speed: 8,
     isProjectile: true,
     rawAnims: HKPBBallRaws,
+  },
+
+  GenericBullet: {
+    name: "Bullet",
+    from: ["freedoom2.wad"],
+    speed: 24,
+    isProjectile: true,
+    rawAnims: HKPBBallRaws
   }
 }
 
@@ -1151,6 +1646,8 @@ var g_Raycaster = new THREE.Raycaster();
 var g_MousePosition = new THREE.Vector2();
 
 let g_PlayerClicked = false;
+let g_KeysPressed = [];
+let g_KeysReleased = [];
 window.addEventListener( 'mousemove', function ( event ) {
 	// calculate mouse position in normalized device coordinates
 	// (-1 to +1) for both components
@@ -1173,6 +1670,23 @@ window.addEventListener( 'mousemove', function ( event ) {
       g_PlayerClicked = true;
     }
   }, false );
+
+  window.addEventListener( 'keyup', function (event) {
+    g_KeysPressed.push(event.which);
+  });
+
+  window.addEventListener( 'keyup', function (event) {
+    g_KeysReleased.push(event.which);
+    if (event.which == Keys.E) {
+      toggleMode();
+    } else if (g_Mode == EDIT_MODE) {
+      if (event.which == Keys.A) {
+        g_EditModeGrid.position.y += 0.25;
+      } else if (event.which == Keys.Z) {
+        g_EditModeGrid.position.y -= 0.25;
+      }
+    }
+  }, false);
 }
 
 function loadSpriteFromWad(wad, sprite, frame) {
@@ -1250,11 +1764,6 @@ let g_CurrentSide = SIDE_PLAYER;
 
 let ui_CTHLabel = document.getElementById("CTHLabel");
 
-// let gp_TargetCTHEstimate = {
-//   checks: 0,
-//   hits: 0,
-//   actor: null,
-// };
 class CTHEstimate {
   constructor() {
     this.reset();
@@ -1314,10 +1823,11 @@ function aiAct() {
   let ai = g_World.actors.find(a => a.side == SIDE_AI && !a.acted && a.isAlive());
   if (!ai) return;
   ai.acted = true;
+  let atkDef = ai.actordef.weapons[0];
   let tgt = g_World.actors.find(a => {
     if (a.side != SIDE_AI && a.isAlive()) {
       let cth = new CTHEstimate();
-      cth.update(ai, a, null, 300)
+      cth.update(ai, a, atkDef, 300)
       if (cth.getCTH() >= 0.1 && cth.getFriendlyCTH() < 0.25) {
         return true;
       }
@@ -1327,7 +1837,7 @@ function aiAct() {
 
   if (tgt) {
     g_TrackedActor = ai;
-    g_CurrentAction = doAttack(ai, tgt);
+    g_CurrentAction = doAttack(ai, tgt, atkDef);
   } else {
     let reachables = findReachableTiles(ai.tile, 5);
     let t = choose(reachables).tile;
@@ -1355,16 +1865,21 @@ function playerAct() {
 
   let reachables = findReachableTiles(g_SelectedActor.tile, 3);
   for (let {tile: t} of reachables) {
-    let obj = t.walkableObject;
-    let oldMat = obj.material;
-    obj.material = walkableObjectMaterial;
-    oldReachables.push([obj, oldMat]);
+    for (let obj of t.walkableObjects) {
+      let oldMat = obj.material;
+      obj.material = walkableObjectMaterial;
+      oldReachables.push([obj, oldMat]);
+    }
   }
 
+  g_Raycaster.setFromCamera( g_MousePosition, g_MainCamera );
   let intersects = g_Raycaster.intersectObjects( g_World.pickable );
   for (let i = 0; i < intersects.length; i++) {
     let obj = intersects[ i ].object;
     if (obj.dtacTile && reachables.some(r => r.tile === obj.dtacTile)) {
+      let pos = obj.dtacTile.object.position.clone();
+      pos.y += 0.02;
+      showHoverCursorAt(pos, 0xffff00);
       let p = findPath(g_SelectedActor.tile, obj.dtacTile);
       // for (let t of p) {
       //   let obj = t.walkableObject;
@@ -1377,7 +1892,8 @@ function playerAct() {
         p.shift();
         let a = obj.dtacTile.actor;
         if (a && a.isAlive() && a !== g_SelectedActor) {
-          g_CurrentAction = doAttack(g_SelectedActor, a);
+          let atkDef = g_SelectedActor.actordef.weapons[0];
+          g_CurrentAction = doAttack(g_SelectedActor, a, atkDef);
         } else {
           g_CurrentAction = doTravel(g_SelectedActor, p);
         }
@@ -1392,14 +1908,16 @@ function playerAct() {
       } else if (a.isAlive()) {
         showHoverCursorAt(a.position, 0xff0000);
         if (g_PlayerClicked) {
-          g_CurrentAction = doAttack(g_SelectedActor, a);
+          let atkDef = g_SelectedActor.actordef.weapons[0];
+          g_CurrentAction = doAttack(g_SelectedActor, a, atkDef);
           g_SelectedActor.acted = true;
         } else {
           if (a !== g_CTHEstimator.actor) {
             resetCTH(g_CTHEstimator);
             g_CTHEstimator.actor = a;
           }
-          updateCTH(g_CTHEstimator, g_SelectedActor, a);
+          let atkDef = g_SelectedActor.actordef.weapons[0];
+          updateCTH(g_CTHEstimator, g_SelectedActor, a, atkDef);
         }
       }
       return;
@@ -1408,8 +1926,8 @@ function playerAct() {
 }
 
 let g_ActorHoverCursor = (() => {
-  let box = new THREE.BoxGeometry(1, 1.2, 1);
-  box.translate(0, 0.6, 0);
+  let box = new THREE.BoxGeometry(1, 1.5, 1);
+  box.translate(0, 0.75, 0);
   let geom = new THREE.EdgesGeometry( box );
   let mat = new THREE.LineBasicMaterial({color: 0x00ff00, linewidth: 3, transparent: true, opacity: 0.25});
   mat.needsUpdate = true;
@@ -1430,19 +1948,127 @@ let g_SelectedActor;
 let g_TrackedActor;
 let g_MainCameraLerping = false;
 let g_TurnCount = 0;
-function mainLoop(currentTime) {
-  let dt = (this.lastCurrentTime ? currentTime - this.lastCurrentTime : 0) / 1000.0;
-  this.lastCurrentTime = currentTime;
-  requestAnimationFrame( mainLoop );
 
-  g_Raycaster.setFromCamera( g_MousePosition, g_MainCamera );
+const PLAY_MODE = 0, EDIT_MODE = 1;
+let g_Mode = PLAY_MODE;
 
-  for (let [obj, oldMat] of oldReachables) {
-    obj.material = oldMat;
+let g_EditModeGrid = new THREE.Group();
+let g_EditModeGridHelper = new THREE.GridHelper(32, 32, 0xff0000, 0xffff00);
+let g_EditModeGridPlane = new THREE.Mesh((new THREE.PlaneGeometry(32, 32)).rotateX(THREE.Math.degToRad(-90)));
+{
+  g_EditModeGrid.add(g_EditModeGridHelper);
+  g_EditModeGrid.add(g_EditModeGridPlane);
+  g_EditModeGridPlane.material.visible = false;
+  g_EditModeGridHelper.position.y += 0.0125;
+  g_EditModeGrid.position.x -= 0.5 - 16;
+  g_EditModeGrid.position.z -= 0.5 - 16;
+}
+
+function toggleMode() {
+  removePreviewTile();
+  if (g_Mode == EDIT_MODE) {
+    g_Mode = PLAY_MODE;
+    g_World.scene.remove(g_EditModeGrid);
+  } else if (g_Mode == PLAY_MODE) {
+    resetPreviewTile();
+    g_World.scene.add(g_EditModeGrid);
+    g_Mode = EDIT_MODE;
+  } else {
+    throw "Unknown mode: " + g_Mode;
   }
-  oldReachables.length = 0;
-  hideHoverCursor();
+}
 
+function addPart(parts, part) {
+  if (!parts.find(p => p.def == part.def && p.rotationY == part.rotationY)) {
+    parts.push(part);
+  }
+}
+
+function justPressedKey(key) {
+  return g_KeysPressed.indexOf(key) !== -1;
+}
+
+let g_EditModeRot = ROT0;
+let g_EditModeSelectedDef = null;
+let g_EditModePreviewTile = null;
+function removePreviewTile() {
+  if (g_EditModePreviewTile) {
+    g_World.scene.remove(g_EditModePreviewTile.object);
+    g_EditModePreviewTile = null;
+  }
+}
+
+function resetPreviewTile() {
+  removePreviewTile();
+  if (g_EditModeSelectedDef === null) {
+    for (let def in TileModelDefs) { g_EditModeSelectedDef = def; break; }
+  }
+  if (g_EditModeSelectedDef === null) {
+    throw "No defs?";
+  }
+  let td = {parts: [{def: g_EditModeSelectedDef, rotationY: g_EditModeRot}], things: []}
+  let t = g_EditModePreviewTile = new DTTile(td, 0, 0, 0);
+  g_World.scene.add(t.object);
+}
+
+function selectTileDef(newdef) {
+  removePreviewTile();
+  g_EditModeSelectedDef = newdef;
+  resetPreviewTile();
+}
+
+function editMode(dt) {
+  g_Raycaster.setFromCamera( g_MousePosition, g_MainCamera );
+  let intersects = g_Raycaster.intersectObject(g_EditModeGridPlane);
+  if (intersects.length) {
+    let {point} = intersects[0];
+    let {x, y, z} = point;
+    x = ((x + 0.5) | 0);
+    z = ((z + 0.5) | 0);
+    point.set(x, y, z);
+    let tx = Math.round(x / TILE_X);
+    let ty = Math.round(y / TILE_Y);
+    let tz = Math.round(z / TILE_Z);
+
+    if (justPressedKey(Keys.X)) {
+      let td = g_World.mapdef.tiles[XYZtoID(tx, ty, tz)];
+      if (td) {
+        td.parts = [];
+        g_World.setTileFromDef(tx, ty, tz, td);
+        g_World.createTileLinks(tx, ty, tz);
+      }
+    }
+
+    if (justPressedKey(Keys.R)) {
+      g_EditModeRot += 1;
+      g_EditModeRot %= MAX_ROT+1;
+      resetPreviewTile();
+    }
+
+    if (justPressedKey(Keys.F)) {
+      let td = g_World.mapdef.tiles[XYZtoID(tx, ty, tz)];
+      if (!td) td = g_World.mapdef.tiles[XYZtoID(tx, ty, tz)] = {
+        x: tx,
+        y: ty,
+        z: tz,
+        parts: [],
+        things: []
+      }
+      addPart(td.parts, {def: g_EditModeSelectedDef, rotationY: g_EditModeRot});
+      g_World.setTileFromDef(tx, ty, tz, td);
+      g_World.createTileLinks(tx, ty, tz);
+    };
+
+    if (g_EditModePreviewTile) {
+      g_EditModePreviewTile.setPosition(tx, ty, tz);
+    }
+
+    // console.log(x, Math.round(y * 4), z);
+    showHoverCursorAt(point);
+  }
+}
+
+function playMode(dt) {
   if (g_CurrentAction) {
     resetCTH(g_CTHEstimator);
     let r = g_CurrentAction.next(dt);
@@ -1471,7 +2097,6 @@ function mainLoop(currentTime) {
       playerAct();
     }
   }
-  g_PlayerClicked = false;
 
   if (g_MainCameraLerping || g_CurrentAction) {
     g_MainCameraLerping = true;
@@ -1487,22 +2112,43 @@ function mainLoop(currentTime) {
     let a = g_TrackedActor || g_SelectedActor;
     let p = a ? a.object.position.clone() : new THREE.Vector3();
     if (a && a.actordef.isProjectile) p.y -= 0.5;
-    g_MainCameraControls.target.lerp(p, 0.05);
+    g_MainCameraControls.target.lerp(p, 5 * dt);
     let t = p.clone();
     t.add(this.initOffset);
-    g_MainCamera.position.lerp(t, 0.05);
+    g_MainCamera.position.lerp(t, 5 * dt);
     if (camState & PAN || almostEqual(g_MainCamera.position, t, 0.1)) {
       g_MainCameraLerping = false;
       this.initOffset = undefined;
     };
   }
+  g_World.actors.forEach(actor => actor.update(dt));
+}
+
+function mainLoop(currentTime) {
+  let dt = (this.lastCurrentTime ? currentTime - this.lastCurrentTime : 0) / 1000.0;
+  this.lastCurrentTime = currentTime;
+  requestAnimationFrame( mainLoop );
+
+  for (let [obj, oldMat] of oldReachables) {
+    obj.material = oldMat;
+  }
+  oldReachables.length = 0;
+  hideHoverCursor();
+
+  if (g_Mode == PLAY_MODE) {
+    playMode(dt);
+  } else if (g_Mode == EDIT_MODE) {
+    editMode(dt);
+  }
+  g_PlayerClicked = false;
 
   g_MainCameraControlsZoomChanged = false;
   g_MainCameraControls.update();
 
-  g_World.actors.forEach(actor => actor.update(dt));
+  g_Renderer.render( g_World.scene, g_MainCamera );
 
-	g_Renderer.render( g_World.scene, g_MainCamera );
+  g_KeysPressed.length = 0;
+  g.g_KeysReleased.length = 0;
 }
 
 function nextPowerOf2(x) {
