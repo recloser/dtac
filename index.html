@@ -40,41 +40,105 @@
             margin: 0 auto;
             padding: 0 auto;
             background-color: gray;
+            overflow: hidden;
         }
 
         #CTHLabel {
             position: absolute;
             left: 0;
             top: 0;
-            font-size: 3em;
-            background-color: rgba(0, 0, 0, 0.1);
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            pointer-events: none;
+            background-color: rgba(0, 0, 0, 0.35);
             color: white;
             font-family: sans-serif;
             /* text-shadow: 1px 1px black; */
-            padding: 0.1em;
+            padding: 4px;
         }
 
-        #TileDefPicker {
+        .edit-mode #CTHLabel {
+            display: none;
+        }
+
+        #DefPicker {
             position: absolute;
             top: 1vh;
             left: 1vw;
             max-height: 98vh;
             background-color: rgba(0, 0, 0, 0.7);
+            overflow: auto;
         }
 
-        .TileDefChoice {
+        .edit-mode #DefPicker {
+            display: initial;
+        }
+
+        #TileDefPicker {
+            display: none;
+        }
+
+        #ActorDefPicker {
+            display: none;
+        }
+
+        .edit-mode .Tiles #TileDefPicker {
+            display: block;
+        }
+
+        .edit-mode .Actors #ActorDefPicker {
+            display: block;
+        }
+
+        .DefChoice {
             font-size: 2em;
             margin: 0.2em;
             font-family: sans-serif;
             color: white;
+        }
+
+        #DebugStuff {
+            position: absolute;
+            display: none;
+            bottom: 0;
+            right: 0;
+            font-size: 2em;
+            color: white;
+            background-color: black;
+        }
+
+        .DamageNumber {
+            position: absolute;
+            transform: translate(-50%, -50%);
+            color: orange;
+            text-shadow: 2px 2px 1px black;
+            pointer-events: none;
+            font-size: 1.6em;
+            font-family: sans-serif;
+        }
+
+        .edit-mode #DebugStuff {
+            display: initial;
         }
     </style>
 </head>
 <body>
     <!-- <script type="text/javascript" src="main.js"></script> -->
     <span id="CTHLabel">N/A</span>
-    <div id="TileDefPicker">
-        <!-- <div class="TileDef">FloorHexes</div> -->
+    <div id="DebugStuff">
+        <span id="CursorLoc"></span>
+    </div>
+    <div id="DefPicker" class="Tiles">
+        <div id="DefPickerTabs" style="font-size: 2em; color: white; border-bottom: 1px solid white;">
+            <span onclick="{let el = document.getElementById('DefPicker'); el.classList.remove('Actors'); el.classList.add('Tiles')}">Tiles</span>
+            <span onclick="{let el = document.getElementById('DefPicker'); el.classList.remove('Tiles'); el.classList.add('Actors')}">Actors</span>
+        </div>
+        <div id="TileDefPicker">
+            <!-- <div class="TileDef">FloorHexes</div> -->
+        </div>
+        <div id="ActorDefPicker">
+            <!-- <div class="TileDef">FloorHexes</div> -->
+        </div>
     </div>
     <script type="text/javascript" src="main.bundle.js"></script>
 </body>
