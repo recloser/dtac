@@ -5,7 +5,9 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <title>D-Tac</title>
     <!-- <script type="text/javascript" src="https://code.jquery.com/jquery-1.11.0.min.js"></script> -->
+    <script type="text/javascript" src="node_modules/pcm-player/pcm-player.min.js"></script>
     <script type="text/javascript" src="three.js"></script>
+    <script type="text/javascript" src="lib/midi.js"></script>
     <script type="text/javascript" src="MapControls.js"></script>
     <script type="text/javascript" src="wad.min.js"></script>
 
@@ -43,10 +45,10 @@
             overflow: hidden;
         }
 
-        #CTHLabel {
+        .ActorHoverInfo {
             position: absolute;
-            left: 0;
-            top: 0;
+            left: -1000;
+            top: -1000;
             transform: translate(-50%, -50%);
             font-size: 24px;
             pointer-events: none;
@@ -57,8 +59,8 @@
             padding: 4px;
         }
 
-        .edit-mode #CTHLabel {
-            display: none;
+        .edit-mode .ActorHoverInfo {
+            display: none !important;
         }
 
         #DefPicker {
@@ -70,16 +72,13 @@
             overflow: auto;
         }
 
+
+        #DefPicker, #TileDefPicker, #ActorDefPicker {
+            display: none;
+        }
+
         .edit-mode #DefPicker {
-            display: initial;
-        }
-
-        #TileDefPicker {
-            display: none;
-        }
-
-        #ActorDefPicker {
-            display: none;
+            display: block;
         }
 
         .edit-mode .Tiles #TileDefPicker {
@@ -120,11 +119,31 @@
         .edit-mode #DebugStuff {
             display: initial;
         }
+
+        .ErrorMessage {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 2em;
+            font-family: sans-serif;
+            padding: 1em;
+            color: black;
+            background-color: white;
+            border: 2px solid red;
+        }
+
+        .NoDisplay {
+            display: none;
+        }
     </style>
 </head>
 <body>
     <!-- <script type="text/javascript" src="main.js"></script> -->
-    <span id="CTHLabel">N/A</span>
+    <div id="ActorHoverInfo" class="ActorHoverInfo">
+        <div id="CTHLabel" class="CTHLabel"></div>
+        <!-- <div id="HPLabel" class="HPLabel"></div> -->
+    </div>
     <div id="DebugStuff">
         <span id="CursorLoc"></span>
     </div>
@@ -139,6 +158,10 @@
         <div id="ActorDefPicker">
             <!-- <div class="TileDef">FloorHexes</div> -->
         </div>
+    </div>
+    <div class="ErrorMessage NoDisplay">
+        <div><span>Something went wrong:</span></div>
+        <div><p class="MessageText"></p></div>
     </div>
     <script type="text/javascript" src="main.bundle.js"></script>
 </body>

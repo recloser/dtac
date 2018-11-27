@@ -1,12 +1,50 @@
 const PriorityQueue = require("js-priority-queue");
 const {Keys} = require("./keys.js");
 const {Maps} = require("./maps.js");
-const {degToRad, radToDeg} = THREE.Math;
+const {degToRad, radToDeg, clamp} = THREE.Math;
 
+const OPTIMIZE_WORLD = false;
+const TILE_X = 1.0, TILE_Y = 0.3, TILE_Z = 1.0;
 const SIDE_PLAYER = 0, SIDE_AI = 1;
 let g_CurrentSide = SIDE_PLAYER;
 
+let g_GotRedCard = false;
+
 function byId(id) { return document.getElementById(id); }
+
+class DTDoomSound {
+  constructor(wadres, name) {
+    let wad = wadres.wadjs;
+    let idx = wad.getLumpIndexByName(name.toUpperCase())
+    let lump = wad.getLump(idx);
+
+    let dv = new DataView(lump);
+    let fmt = dv.getUint16(0, true);
+    if (fmt !== 3) throw `Invalid fmt: expected 3, got ${fmt}`;
+    this.sampleRate = dv.getUint16(2, true);
+    this.sampleCount = dv.getUint32(4, true);
+    this.samples = new Uint8Array(this.sampleCount);
+    for (let i = 0; i < this.sampleCount; i++) {
+      this.samples[i] = dv.getUint8(8 + i) - 128;
+    }
+  }
+
+  play() {
+    let player = new PCMPlayer({
+      encoding: '8bitInt',
+      channels: 1,
+      sampleRate: this.sampleRate,
+      flushingTime: 50000,
+    });
+    player.volume(0.05);
+    player.feed(this.samples);
+    player.flush();
+    setTimeout(() => {
+      player.destroy();
+    },
+    (this.samples.length / this.sampleRate) * 1000 + 300)
+  }
+}
 
 function choose(x) {
   let y = x;
@@ -62,7 +100,7 @@ function updateDamagePopups(dt) {
 function updateDamagePopup(popup, dt) {
   popup.time += dt;
   let {el, pos, time} = popup;
-  pos.y += 1.0 * dt;
+  pos.y += TILE_Y * dt;
   let sp = toScreenspace(pos.clone());
   el.style.left = sp.x + "px";
   el.style.top = sp.y + "px";
@@ -78,7 +116,7 @@ function makeDamagePopup(actor, position, damage) {
   let last;
   if ((last = g_DamagePopups[g_DamagePopups.length - 1]) && last.actor == actor) {
     last.damage += damage;
-    last.el.innerText = "" + last.damage;
+    last.el.innerText = (last.damage > 0 ? "+" : "") + last.damage;
     last.time -= 0.1;
     return;
   }
@@ -87,7 +125,7 @@ function makeDamagePopup(actor, position, damage) {
   let popup = {el, pos, actor, damage, time: 0};
   updateDamagePopup(popup, 0);
   document.body.appendChild(el);
-  el.innerText = "" + damage;
+  el.innerText = (damage > 0 ? "+" : "") + damage;
   g_DamagePopups.push(popup)
 }
 
@@ -100,6 +138,13 @@ let g_CurrentAction;
 
 const Resources = {
   wads: {},
+
+  get(names) {
+    let wadres;
+    for (let wadname of names) {
+      if (wadres = Resources.wads[wadname]) return wadres;
+    }
+  },
 
   loadWadFromURL: function(url, as) {
     if (as === undefined) {
@@ -135,7 +180,7 @@ const Resources = {
 function start() {
   Resources.loadWadFromURL(BASE_WAD).then(
     function() {
-      return Resources.loadWadFromURL("doom.wad");
+      // return Resources.loadWadFromURL("doom.wad");
       return true;
     },
     function() {
@@ -146,7 +191,30 @@ function start() {
   )
   .then(
     function() {
-      let renderer = g_Renderer = new THREE.WebGLRenderer();
+      let wad = Resources.wads[BASE_WAD].wadjs;
+      let idx = wad.getLumpIndexByName("D_ULTIMA");
+      let typ = wad.detectLumpType(idx);
+      let data = wad.getLump(idx);
+      let mid;
+      if (typ == MUS) mid = mus2midi(data);
+      else mid = data;
+      let midblob = URL.createObjectURL(new Blob([mid]));
+      MIDIjs.play(midblob);
+
+      let renderer;
+      try {
+        renderer = g_Renderer = new THREE.WebGLRenderer();
+      } catch (error) {
+        let el = document.querySelector(".ErrorMessage")
+        if (el) {
+          el.classList.remove("NoDisplay")
+          let msg = el.querySelector(".MessageText");
+          if (msg) {
+            msg.innerText = "WebGL error: " + (error instanceof Error ? error.message : error + "");
+          }
+        }
+        throw error;
+      }
 
       window.addEventListener( 'resize', onWindowResize, false );
 
@@ -163,16 +231,20 @@ function start() {
       document.body.appendChild( renderer.domElement );
 
       initActorDefs();
+      initWeaponDefs();
       initTileModelDefs();
 
       g_World = new DTWorld();
-      for (let actor of g_World.actors) { actor.visibilityCheck() }
-
+      let pos;
+      for (let actor of g_World.actors) {
+        actor.visibilityCheck()
+        if (!pos && actor.side == SIDE_PLAYER) pos = actor.position;
+      }
       g_MainCamera = new THREE.PerspectiveCamera( 20, window.innerWidth / window.innerHeight, 0.1, 1000 );
-      g_MainCamera.position.x = 24;
-      g_MainCamera.position.z = 24;
-      g_MainCamera.position.y = 12.5;
-      g_MainCameraControls = new THREE.MapControls( g_MainCamera );
+      g_MainCamera.position.x = pos.x - 12;
+      g_MainCamera.position.z = pos.z - 12;
+      g_MainCamera.position.y = pos.y + 16;
+      g_MainCameraControls = new THREE.MapControls( g_MainCamera, g_Renderer.context.canvas );
       g_MainCameraControls.minPolarAngle = degToRad(30);
       g_MainCameraControls.maxPolarAngle = degToRad(85);
       // g_MainCameraControls.enableDamping = true;
@@ -197,8 +269,18 @@ start();
 class DTWadResource {
   constructor(wadjs) {
     this.wadjs = wadjs;
-    this.graphics = [];
-    this.sprites = [];
+    this.graphics = {};
+    this.sprites = {};
+    this.sounds = {};
+  }
+
+  getSound(name) {
+    let s = this.sounds[name];
+    if (!s) {
+      s = this.sounds[name] = new DTDoomSound(this, name);
+    }
+
+    return s;
   }
 
   getGraphic(name) {
@@ -382,6 +464,66 @@ function rotDir(rot, dir) {
   return dir % (MAX_DIR+1);
 }
 
+function Box(
+  width, height, depth, {
+    xs = 1.0,
+    xt = 1.0,
+    ys = 1.0,
+    yt = 1.0,
+    zs = 1.0,
+    zt = 1.0,
+
+  } = {})
+{
+  let b = new THREE.Geometry();
+  let scale = new THREE.Vector2(zs, zt);
+
+  scale.set(xs, xt);
+  let xp = new THREE.PlaneGeometry(width, height);
+  for (let uvs of xp.faceVertexUvs[0]) {
+    uvs[0].multiply(scale);
+    uvs[1].multiply(scale);
+    uvs[2].multiply(scale);
+  }
+  xp.rotateY(degToRad(90))
+  xp.translate(-depth/2, height/2, 0);
+  b.merge(xp, xp.matrix, 0);
+  xp.translate(depth, 0, 0);
+  b.merge(xp, xp.matrix, 0);
+
+  scale.set(ys, yt);
+  let yp = new THREE.PlaneGeometry(depth, width);
+  for (let uvs of yp.faceVertexUvs[0]) {
+    uvs[0].multiply(scale);
+    uvs[1].multiply(scale);
+    uvs[2].multiply(scale);
+  }
+  yp.rotateX(degToRad(90))
+  // yp.rotateY(degToRad(-90))
+  yp.translate(0, height, 0);
+  b.merge(yp, yp.matrix, 1);
+  yp.translate(0, -height, 0);
+  b.merge(yp, yp.matrix, 1);
+
+  scale.set(zs, zt);
+  let zp = new THREE.PlaneGeometry(depth, height);
+  for (let uvs of zp.faceVertexUvs[0]) {
+    uvs[0].multiply(scale);
+    uvs[1].multiply(scale);
+    uvs[2].multiply(scale);
+  }
+  zp.translate(0, height/2, -width/2);
+  b.merge(zp, zp.matrix, 2);
+  zp.translate(0, 0, width);
+  b.merge(zp, zp.matrix, 2);
+
+  return b;
+}
+
+// function DoorFull() {
+
+// }
+
 function Quarter4() {
   let g = new THREE.Geometry();
   let p = Quarter1();
@@ -395,7 +537,7 @@ function Quarter4() {
   return g;
 }
 function Quarter1() {
-  return new THREE.PlaneGeometry(1.0, 0.25).translate(0.0, 0.125, -0.5);
+  return new THREE.PlaneGeometry(1.0, TILE_Y).translate(0.0, TILE_Y * 0.5, -0.5);
 }
 
 function Full4() {
@@ -411,7 +553,23 @@ function Full4() {
   return g;
 }
 function Full1() {
-  return new THREE.PlaneGeometry(1.0, 1.0).translate(0.0, 0.5, -0.5);
+  return new THREE.PlaneGeometry(1.0, TILE_Y * 4).translate(0.0, TILE_Y * 4 * 0.5, -0.5);
+}
+
+function Half4() {
+  let g = new THREE.Geometry();
+  let p = Half1();
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  p.rotateY(degToRad(90));
+  g.merge(p);
+  return g;
+}
+function Half1() {
+  return new THREE.PlaneGeometry(1.0, TILE_Y * 2).translate(0.0, TILE_Y * 2 * 0.5, -0.5);
 }
 
 function Tall4() {
@@ -427,11 +585,51 @@ function Tall4() {
   return g;
 }
 function Tall1() {
-  return new THREE.PlaneGeometry(1.0, 2.0).translate(0.0, 0.125, -0.5);
+  return new THREE.PlaneGeometry(1.0, TILE_Y * 8).translate(0.0, TILE_Y * 8 * 0.5, -0.5);
 }
 
 function FloorGeom() {
   return new THREE.PlaneGeometry(1, 1).rotateX(degToRad(-90)).translate(0.0, 0.0/*125*/, 0.0);
+}
+
+function mkFullWall1(name, ss = 1.0, st = 1.0) {
+  return {
+    geom: Full1(),
+    scaleS: ss,
+    scaleT: st,
+    matn: name,
+    blocks: [NORTH]
+  }
+}
+
+function mkFullWall4(name, ss = 1.0, st = 1.0) {
+  return {
+    geom: Full4(),
+    scaleS: ss,
+    scaleT: st,
+    matn: name,
+    blocks: ALLDIRS
+  }
+}
+
+function mkHalfWall1(name, ss = 1.0, st = 0.5) {
+  return {
+    geom: Half1(),
+    scaleS: ss,
+    scaleT: st,
+    matn: name,
+    blocks: [NORTH]
+  }
+}
+
+function mkHalfWall4(name, ss = 1.0, st = 0.5) {
+  return {
+    geom: Half4(),
+    scaleS: ss,
+    scaleT: st,
+    matn: name,
+    blocks: ALLDIRS
+  }
 }
 
 const ALLDIRS = [NORTH, EAST, SOUTH, WEST];
@@ -517,6 +715,55 @@ const TileModelDefs = {
     blocks: ALLDIRS
   },
 
+  BaseGrayFullWall1: mkFullWall1("SW11_1", 2.0, 0.5625),
+  BaseGrayFullWall4: mkFullWall4("SW11_1", 2.0, 0.5625),
+  BaseGray2FullWall1: mkFullWall1("SW15_3", 2.0, 0.5625),
+  BaseGray2FullWall4: mkFullWall4("SW15_3", 2.0, 0.5625),
+
+  BaseTanFullWall1: mkFullWall1("SW12_5", 2.0, 0.5625),
+  BaseTanFullWall4: mkFullWall4("SW12_5", 2.0, 0.5625),
+  BaseTan2FullWall1: mkFullWall1("SW17_4", 2.0, 0.5625),
+  BaseTan2FullWall4: mkFullWall4("SW17_4", 2.0, 0.5625),
+  BaseTan3FullWall1: mkFullWall1("SW17_5", 2.0, 0.5625),
+  BaseTan3FullWall4: mkFullWall4("SW17_5", 2.0, 0.5625),
+
+  BaseTanFullSide: {
+    geom: Box(0.2, TILE_Y * 4, 1.0, {zs: 2.0, zt: 0.5625}).translate(0.0, 0.0, 0.5 - 0.1),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["SW12_5", "SW12_5", "SW12_5"],
+    blocks: [SOUTH]
+  },
+
+  BaseTanHalfSide: {
+    geom: Box(0.2, TILE_Y * 2, 1.0, {zs: 2.0, zt: 0.5625 * 0.5}).translate(0.0, 0.0, 0.5 - 0.1),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["SW12_5", "SW12_5", "SW12_5"],
+    blocks: [SOUTH]
+  },
+
+  BaseTanQuarterSide: {
+    geom: Box(0.2, TILE_Y * 1, 1.0, {zs: 2.0, zt: 0.5625 * 0.25}).translate(0.0, 0.0, 0.5 - 0.1),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["SW12_5", "SW12_5", "SW12_5"],
+    blocks: []
+  },
+
+  GrnFullWall1: mkFullWall1("RW37_1", 1.0, 0.5625),
+  GrnFullWall4: mkFullWall4("RW37_1", 1.0, 0.5625),
+  Grn2FullWall1: mkFullWall1("RW37_2", 1.0, 0.5625),
+  Grn2FullWall4: mkFullWall4("RW37_2", 1.0, 0.5625),
+
+  Grn2HalfWall1: mkHalfWall1("RW37_2", 1.0, 0.25),
+  Grn2HalfWall4: mkHalfWall4("RW37_2", 1.0, 0.25),
+
+  RustyPanelsFullWall1: mkFullWall1("RW33_1", 1.0, 0.5),
+  RustyPanelsFullWall4: mkFullWall4("RW33_1", 1.0, 0.5),
+  RustyPanels2FullWall1: mkFullWall1("RW33_2", 1.0, 0.5),
+  RustyPanels2FullWall4: mkFullWall4("RW33_2", 1.0, 0.5),
+
   TanFullWall1: {
     geom: Full1(),
     scaleS: 1.0,
@@ -547,11 +794,82 @@ const TileModelDefs = {
     blocks: ALLDIRS
   },
 
+  TanHalfWall1: {
+    geom: Half1(),
+    scaleS: 1.0,
+    scaleT: 0.5,
+    matn: "WALL02_1",
+    blocks: [SOUTH]
+  },
+  TanHalfWall4: {
+    geom: Half4(),
+    scaleS: 1.0,
+    scaleT: 0.5,
+    matn: "WALL02_1",
+    blocks: ALLDIRS
+  },
+
+  Tan2HalfWall1: {
+    geom: Half1(),
+    scaleS: 1.0,
+    scaleT: 0.5,
+    matn: "WALL02_2",
+    blocks: [SOUTH]
+  },
+  Tan2HalfWall4: {
+    geom: Half4(),
+    scaleS: 1.0,
+    scaleT: 0.5,
+    matn: "WALL02_2",
+    blocks: ALLDIRS
+  },
+
+  FullDoor: {
+    geom: Box(1.0, TILE_Y * 4, 0.4),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["DOOR3_6", "DOORTRAK", "DOORTRAK"],
+    isDoor: true,
+    blocks: []
+  },
+  MetalFullDoor: {
+    geom: Box(1.0, TILE_Y * 4, 0.4),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["DOOR3_5", "DOORTRAK", "DOORTRAK"],
+    isDoor: true,
+    blocks: []
+  },
+
+  TanTallDoor: {
+    geom: Box(1.0, TILE_Y * 8, 0.5),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["DOOR15_4", "DOORTRAK", "DOORTRAK"],
+    isDoor: true,
+    blocks: []
+  },
+  // GrayFullDoor4: {
+  //   geom: Box(),
+  //   scaleS: 1.0,
+  //   scaleT: 1.0,
+  //   matn: "DOOR15_3",
+  //   blocks: []
+  // },
+
   CompsHalfSide: {
-    geom: new THREE.BoxGeometry(1.0, 0.5, 0.25).translate(0.0, 0.25, 0.5),
+    geom: new THREE.BoxGeometry(1.0, TILE_Y * 2, 0.25).translate(0.0, TILE_Y * 2 * 0.5, 0.5),
     scaleS: 2.0,
     scaleT: 1.0,
     matn: "COMP02_3",
+    blocks: [SOUTH]
+  },
+
+  Comps2HalfSide: {
+    geom: Box(0.2, TILE_Y * 2, 1.0).translate(0.0, 0.0, 0.5 - 0.1),//new THREE.BoxGeometry(1.0, TILE_Y * 2, 0.2).translate(0.0, TILE_Y * 2 * 0.5, 0.5 - 0.1),
+    scaleS: 2.0,
+    scaleT: 1.0,
+    matn: ["COMP03_4", "COMP03_4", "COMP02_3"],
     blocks: [SOUTH]
   },
 
@@ -560,7 +878,7 @@ const TileModelDefs = {
     scaleS: 1.0,
     scaleT: 1.0,
     matn: "COMP02_3",
-    blocks: ALLDIRS
+    blocks: [SOUTH]
   },
   CompsFull4: {
     geom: Full4(),
@@ -575,7 +893,7 @@ const TileModelDefs = {
     scaleS: 1.0,
     scaleT: 1.0,
     matn: "COMP02_5",
-    blocks: ALLDIRS
+    blocks: [SOUTH]
   },
   Comps2Full4: {
     geom: Full4(),
@@ -590,7 +908,7 @@ const TileModelDefs = {
     scaleS: 1.0,
     scaleT: 1.0,
     matn: "COMP02_1",
-    blocks: ALLDIRS
+    blocks: [SOUTH]
   },
   Comps3Full4: {
     geom: Full4(),
@@ -605,7 +923,7 @@ const TileModelDefs = {
     scaleS: 2.0,
     scaleT: 1.0,
     matn: "COMP03_4",
-    blocks: ALLDIRS
+    blocks: [SOUTH]
   },
   CompsPlainFull4: {
     geom: Full4(),
@@ -620,7 +938,7 @@ const TileModelDefs = {
     scaleS: 2.0,
     scaleT: 1.0,
     matn: "COMP03_8",
-    blocks: ALLDIRS
+    blocks: [SOUTH]
   },
   CompsVentsFull4: {
     geom: Full4(),
@@ -635,7 +953,7 @@ const TileModelDefs = {
     scaleS: 1.0,
     scaleT: 1.0,
     matn: "COMP04_1",
-    blocks: ALLDIRS
+    blocks: [SOUTH]
   },
   CompsInnardsFull4: {
     geom: Full4(),
@@ -650,7 +968,7 @@ const TileModelDefs = {
     scaleS: 1.0,
     scaleT: 1.0,
     matn: "COMP03_2",
-    blocks: ALLDIRS
+    blocks: [SOUTH]
   },
   CompsBlueFull4: {
     geom: Full4(),
@@ -687,7 +1005,11 @@ function initTileModelDefs() {
       uvs[2].multiply(scale);
     }
     t.geom.uvsNeedUpdate = true;
-    t.mat = texMat(t.matn);
+    if (t.matn instanceof Array) {
+      let mats = t.matn.map(texMat);
+      t.mat = mats;
+    }
+    else t.mat = texMat(t.matn);
   }
 
   let tdp = document.querySelector("#TileDefPicker");
@@ -701,30 +1023,6 @@ function initTileModelDefs() {
     }
   } else {
     console.error("TDP not found?");
-  }
-}
-
-// const MapDef = {
-//   tiles: {
-//     XYZtoID(0, 0, 0): {
-//     x: 0,
-//     y: 0,
-//     z: 0,
-//     parts: [
-//       {def: TileDefs.FloorHexes, rotationY: 0},
-//       {def: TileDefs.HalfSideComps, rotationY: ROT90},
-//     ],
-//     things: [
-//       {type: "spawn", what: "DoomImp"},
-//     ]
-//   }]
-// }
-
-class DTTileModel {
-  constructor(geom, material, walkableGeom) {
-    this.geom = geom;
-    this.material = material;
-    this.walkableGeom = walkableGeom;
   }
 }
 
@@ -895,7 +1193,7 @@ const getPosAndDirForAttack = (function(){
     }
     dir.applyMatrix4(mx);
 
-    // pos.add(dir.clone().multiplyScalar(0.1));
+    pos.add(dir.clone().multiplyScalar(0.01));
 
     if (ret) return [pos, dir];
   }
@@ -940,6 +1238,7 @@ function* doAttack(actor, victim, attackDef) {
       projectiles = callCombined(projectiles, dt);
     }
 
+    if (attackDef.attackSound) attackDef.attackSound.play();
     for (let bullet = 0; bullet < attackDef.bulletsPerShot; bullet++) {
       let [pos, dir] = getPosAndDirForAttack(actor, victim, attackDef);
 
@@ -957,6 +1256,7 @@ function* doTravel(actor, path) {
   for (let tile of path) {
     if (tile === actor.tile) continue;
     let tpos = tile.position.clone();
+    if (tile.hasDoor && !tile.isDoorOpen) yield* tile.doOpenDoor();
     // tpos.y += 0.5;
     yield* doCombined(
       doFaceTowards(actor, tpos, DEFAULT_ROTATION_SPEED),
@@ -970,7 +1270,6 @@ function* doTravel(actor, path) {
 const walkableObjectMaterialTest = new THREE.MeshLambertMaterial({color: 0x00ffff, transparent: true, opacity: 0.25})
 const walkableObjectMaterial = new THREE.MeshLambertMaterial({color: 0xffff00, transparent: true, opacity: 0.25})
 const walkableObjectMaterialInvisible = new THREE.MeshLambertMaterial({color: 0x00ffff, visible: false})
-const TILE_X = 1.0, TILE_Y = 0.25, TILE_Z = 1.0;
 class DTTile {
   constructor(tiledef, x, y, z) {
     let {parts, things} = this.tiledef = tiledef;
@@ -982,26 +1281,43 @@ class DTTile {
     if (tiledef.actor && tiledef.actor.def) {
       this.actordefActor = new DTActor(ActorDefs[tiledef.actor.def]);
       this.actordefActor.discover();
-      this.actordefActor.setPosition(x, y, z);
+      this.actordefActor.setPosition(this.position);
     }
 
+    this.doorObjects = [];
     this.renderObjects = [];
     this.walkableObjects = [];
     for (let part of parts) {
       let tmd = TileModelDefs[part.def];
       let rot = "rotationY" in part ? part.rotationY : ROT0;
       let r = ROTtoRads(rot);
+      let tr = (rot / MAX_ROT) * 0.01;
       for (let blockDir of tmd.blocks || []) {
         let d = rotDir(rot, blockDir);
         if (this.blocked.indexOf(d) == -1) this.blocked.push(d);
       }
+
       let renderObject = new THREE.Mesh(tmd.geom, tmd.mat);
+      renderObject.scale.z = 1.0 + tr;
+      renderObject.scale.y = 1.0 + tr / 4;
+      // renderObject.scale.x = 1.0;
       renderObject.rotateY(r);
       renderObject.dtacTile = this;
-      this.renderObjects.push(renderObject);
-      // if (tiledef.walkableGeom) {
+      renderObject.dtacDef = tmd;
+      if (tmd.isDoor) {
+        this.hasDoor = true;
+        this.isDoorOpen = false;
+        if (!this.doorObject) {
+          this.doorObject = new THREE.Group();
+          this.object.add(this.doorObject);
+        }
+        this.doorObject.add(renderObject);
+        this.doorObjects.push(renderObject);
+      } else {
+        this.renderObjects.push(renderObject);
+      }
+
       if (tmd.walkable) {
-        // walkableObject = new THREE.Mesh(tiledef.walkableGeom, walkableObjectMaterialInvisible);
         let walkableObject = new THREE.Mesh(tmd.geom, walkableObjectMaterialInvisible);
         walkableObject.rotateY(r);
         walkableObject.position.y += 0.01;
@@ -1010,11 +1326,27 @@ class DTTile {
       }
     }
 
-    for (let ro of this.renderObjects) this.object.add(ro);
+    if (!OPTIMIZE_WORLD) for (let ro of this.renderObjects) this.object.add(ro);
     this.object.dtacTile = this;
     for (let wo of this.walkableObjects) this.object.add(wo);
 
     this.id = XYZtoID(x, y, z);
+  }
+
+  *doOpenDoor() {
+    if (this.isDoorOpen) return;
+    this.isDoorOpen = true;
+    let to = this.doorObject.position.clone();
+    to.y -= (TILE_Y * 4) * 0.925;
+    yield* doMoveTowards(this.doorObject.position, to, 1.6);
+  }
+
+  *doCloseDoor() {
+    if (!this.isDoorOpen) return;
+    this.isDoorOpen = false;
+    let to = this.doorObject.position.clone();
+    to.y += (TILE_Y * 4) * 0.925;
+    yield* doMoveTowards(this.doorObject.position, to, 1.9);
   }
 
   setPosition(x, y, z) {
@@ -1227,15 +1559,15 @@ class DTWorld {
       // actor.setTile(this.tileAt(4, 0, 7));
       // this.addActor(actor);
 
-      actor = new DTActor(ActorDefs.FreedoomGuy);
-      actor.side = SIDE_PLAYER;
-      actor.setTile(this.tileAt(8, 0, 2));
-      this.addActor(actor);
+      // actor = new DTActor(ActorDefs.FreedoomGuy);
+      // actor.side = SIDE_PLAYER;
+      // actor.setTile(this.tileAt(8, 0, 2));
+      // this.addActor(actor);
 
-      actor = new DTActor(ActorDefs.DoomGuy);//.resourcesFound ? ActorDefs.DoomGuy : ActorDefs.FreedoomGuy);
-      actor.side = SIDE_PLAYER;
-      actor.setTile(this.tileAt(10, 0, 2));
-      this.addActor(actor);
+      // actor = new DTActor(ActorDefs.DoomGuy);//.resourcesFound ? ActorDefs.DoomGuy : ActorDefs.FreedoomGuy);
+      // actor.side = SIDE_PLAYER;
+      // actor.setTile(this.tileAt(10, 0, 2));
+      // this.addActor(actor);
     }
 
     let enemydef = ActorDefs.Serpentipede;
@@ -1245,6 +1577,43 @@ class DTWorld {
       actor2.setTile(this.tileAt(12, 0, 4));
       actor2.side = SIDE_AI;
       this.addActor(actor2);
+    }
+
+    if (OPTIMIZE_WORLD) {
+      this.optimize();
+    }
+  }
+
+  optimize() {
+    let objects = [];
+    let byDef = new Map();
+    for (let tile of this.tiles) {
+      for (let ro of tile.renderObjects) {
+        let values;
+        if (!byDef.has(ro.dtacDef)) byDef.set(ro.dtacDef, values = [])
+        else values = byDef.get(ro.dtacDef);
+        values.push(ro);
+      }
+    }
+
+    let mat4 = new THREE.Matrix4();
+    for (let group of byDef.values()) {
+      let geom = new THREE.Geometry();
+      let mat;
+      for (let ro of group) {
+        ro.dtacTile.object.add(ro);
+        ro.updateMatrixWorld();
+        mat4.copy(ro.matrixWorld);
+        ro.dtacTile.object.remove(ro);
+        geom.merge(ro.geometry, mat4);
+        mat = ro.material;
+      }
+      objects.push(new THREE.Mesh(geom, mat));
+    }
+
+    console.log(objects.length);
+    for (let object of objects) {
+      this.scene.add(object);
     }
   }
 
@@ -1311,6 +1680,7 @@ class DTWorld {
       old.removeAllLinks();
       swapRemove(this.tiles, old);
       for (let ro of old.renderObjects) swapRemove(this.collidables, ro);
+      for (let ro of old.doorObjects) swapRemove(this.collidables, ro);
       for (let wo of old.walkableObjects) {
         swapRemove(this.walkable, wo);
         swapRemove(this.pickable, wo);
@@ -1325,6 +1695,7 @@ class DTWorld {
     let t = new DTTile(tiledef, x, y, z);
     this.tiles.push(t);
     for (let ro of t.renderObjects) this.collidables.push(ro);
+    for (let ro of t.doorObjects) this.collidables.push(ro);
     for (let wo of t.walkableObjects) {
       this.walkable.push(wo);
       this.pickable.push(wo);
@@ -1354,6 +1725,8 @@ class DTWorld {
       this.collidables.push(actor.collisionObject);
       this.pickable.push(actor.collisionObject);
     }
+
+    if (actor.infoElement) document.body.append(actor.infoElement);
     this.pickable.push(actor.renderObject);
   }
 
@@ -1363,8 +1736,10 @@ class DTWorld {
     swapRemove(this.actors, actor);
     if (actor.collisionObject) {
       swapRemove(this.collidables, actor.collisionObject);
-      swapRemove(this.pickable, actor.collisionObject);
+      swapRemove(this.pickable, actor.collisionObject)
     }
+
+    if (actor.infoElement) actor.infoElement.remove();
     swapRemove(this.pickable, actor.renderObject);
   }
 
@@ -1391,6 +1766,11 @@ class DTActor {
     }
     this.actordef = actordef;
 
+    this.hp = this.maxHp;
+    if ("sideOverride" in actordef) this.side = actordef.sideOverride;
+    else this.side = SIDE_AI;
+    this.discovered = actordef.isProjectile || actordef.isItem || this.side == SIDE_PLAYER;
+
     let geometry = new THREE.PlaneGeometry( 1, 1, 1 );
     geometry.translate(0, 0.5, 0);
 
@@ -1399,13 +1779,41 @@ class DTActor {
     material.alphaTest = 0.1;
     material.map = null;
 
+    if (!actordef.isProjectile) {
+      let behindMat = new THREE.MeshBasicMaterial({
+        color: this.actordef.isItem ? 0xffff00 : (this.side == SIDE_PLAYER ? 0x00ff00 : 0xff0000),
+        transparent: true
+      });
+      behindMat.depthFunc = THREE.GreaterDepth;
+      behindMat.opacity = 0.25;
+      behindMat.alphaTest = 0.1;
+      behindMat.depthWrite = false;
+      behindMat.map = null;
+      this.renderObjectBehind = new THREE.Mesh(geometry, behindMat);
+      this.renderObjectBehind.dtacActor = this;
+      this.renderObjectBehind.visible = false;
+    }
+
     this.renderObject = new THREE.Mesh( geometry, material );
     this.renderObject.dtacActor = this;
     this.renderObject.castShadow = true;
+    this.renderObject.visible = false;
 
-    if (!actordef.isProjectile) {
+    if (!actordef.isProjectile && !actordef.isItem) {
       this.collisionObject = new THREE.Mesh(ActorCollisionGeom, ActorCollisionMaterial);
       this.collisionObject.dtacActor = this;
+
+      let info = document.createElement("div");
+      let cth = document.createElement("div");
+      let hp = document.createElement("div");
+      info.className = "ActorHoverInfo";
+      hp.className = "HPLabel";
+      info.append(cth);
+      info.append(hp);
+      info.style.display = "none";
+
+      this.infoElement = info;
+      this.infoElementHp = hp;
     }
 
     this.facing = 0;
@@ -1415,17 +1823,12 @@ class DTActor {
     this.object = new THREE.Group();
     this.object.dtacActor = this;
     this.object.add(this.renderObject);
+    if (this.renderObjectBehind) this.object.add(this.renderObjectBehind);
     if (this.collisionObject) this.object.add(this.collisionObject);
     this.object.add(facingArrow);
     this.object.translateY(ACTOR_OFFSET);
 
     this.playAnim("idleAnim");
-
-    this.hp = actordef.hp || 1;
-    if ("sideOverride" in actordef) this.side = actordef.sideOverride;
-    else this.side = SIDE_AI;
-    this.discovered = actordef.isProjectile || this.side == SIDE_PLAYER;
-    this.renderObject.visible = this.discovered;
 
     // let uniforms = { texture:  { type: "t", value: 0, texture: null } };
     // let vertexShader = document.getElementById( 'vertexShaderDepth' ).textContent;
@@ -1438,11 +1841,39 @@ class DTActor {
     }
 
     this.resetActions();
+
+    if (this.discovered) this.discover();
+  }
+
+  getWeapon() {
+    let sp = this.specialWeapon;
+    if (sp && sp.shots > 0) return sp.def;
+    return this.actordef.weapons[0];
+  }
+
+  pickupSpecialWeapon(def) {
+    if (this.specialWeapon && this.specialWeapon.def == def) {
+      this.specialWeapon = {
+        shots: 8 + this.specialWeapon.shots,
+        def: def
+      };
+    } else {
+      this.specialWeapon = {
+        shots: 8,
+        def: def
+      };
+    }
+  }
+
+  get maxHp() {
+    return this.actordef.hp || 1;
   }
 
   discover() {
     this.discovered = true;
     this.renderObject.visible = true;
+    if (this.renderObjectBehind) this.renderObjectBehind.visible = true;
+    if (this.infoElement) this.infoElement.style.display = "block";
   }
 
   resetActions() {
@@ -1454,7 +1885,7 @@ class DTActor {
   }
 
   canAct() {
-    return this.actionsLeft > 0 && (this.side == SIDE_PLAYER || this.discovered);
+    return this.actionsLeft > 0 && !this.actordef.isItem && (this.side == SIDE_PLAYER || this.discovered);
   }
 
   takeAction() {
@@ -1480,13 +1911,21 @@ class DTActor {
       let playingDeath = this.anim && !this.anim.isFinished() && (this.anim.name == "deathAnim" || this.anim.name == "deathAnimX");
       if (!playingDeath) {
         g_World.removeActor(this);
+      } else if (this.anim.ticsToGo == -1) {
+        if (this.renderObjectBehind) this.object.remove(this.renderObjectBehind);
       }
+    }
+
+    if (this.infoElement) {
+      moveElementTo(this.infoElement, this.object.position);
+      this.infoElementHp.innerText = `HP: ${this.hp}/${this.maxHp}`;
     }
 
     let cam = g_MainCamera;
     let cp = cam.position.clone();
     cp.y *= 0.2;
     this.renderObject.lookAt(cp);
+    if (this.renderObjectBehind) this.renderObjectBehind.lookAt(cp);
 
     cp.sub(this.object.position)
     cp.y = 0;
@@ -1498,23 +1937,25 @@ class DTActor {
 
     let fr = this.anim.frame.bydir[dir];
     if (!fr) fr = this.anim.frame.bydir[0];
-    let ro = this.renderObject;
-    if(ro.material.map != fr.texture) {
-      ro.material.map = fr.texture;
-      ro.material.needsUpdate = true;
+    for (let ro of [this.renderObject, this.renderObjectBehind]) {
+      if (!ro) continue;
+      if (ro.material.map != fr.texture) {
+        ro.material.map = fr.texture;
+        ro.material.needsUpdate = true;
 
-      // let utx = ro.customDepthMaterial.uniforms.texture;
-      // utx.value = fr.texture;
-      // ro.customDepthMaterial.needsUpdate = true;
+        // let utx = ro.customDepthMaterial.uniforms.texture;
+        // utx.value = fr.texture;
+        // ro.customDepthMaterial.needsUpdate = true;
 
-      const div = 64;
-      let xx = fr.graphic.width / div;
-      let xo = fr.graphic.xOffset / div;
-      let yy = fr.graphic.height * 1.2 / div;
-      let yo = (fr.graphic.yOffset + 5) * 1.2 / div;
-      ro.position.y = yo - yy;
-      ro.position.x = xo - xx/2;
-      ro.scale.set(xx, yy, 1)
+        const div = 64;
+        let xx = fr.graphic.width / div;
+        let xo = fr.graphic.xOffset / div;
+        let yy = fr.graphic.height * 1.2 / div;
+        let yo = (fr.graphic.yOffset + 5) * 1.2 / div;
+        ro.position.y = yo - yy;
+        ro.position.x = xo - xx/2;
+        ro.scale.set(xx, yy, 1)
+      }
     }
   }
 
@@ -1540,17 +1981,30 @@ class DTActor {
   }
 
   setTile(tile, warpTo = true) {
-    if (tile && tile.actor) throw "Something already stands on that tile";
-    if (this.tile) this.tile.actor = null;
-    this.tile = tile;
-    if(this.tile) this.tile.actor = this;
+    if (this.actordef.isItem) {
+      if (tile && tile.item) throw "Some item already is on that tile";
+      if (this.tile) this.tile.item = null;
+      this.tile = tile;
+      if (this.tile) this.tile.item = this;
+    } else {
+      if (tile && tile.actor) throw "Something already stands on that tile";
+      if (this.tile) this.tile.actor = null;
+      this.tile = tile;
+      if (this.tile) this.tile.actor = this;
+
+      if (this.side == SIDE_PLAYER && this.tile && this.tile.item) {
+        if (this.tile.item.actordef.onpickup(this)) {
+          this.tile.item.die();
+        }
+      }
+    }
 
     if (this.tile && warpTo) {
       const {x, y, z} = tile.position;
       this.setPosition(x, y, z);
     }
 
-    this.visibilityCheck();
+    if (!this.actordef.isItem) this.visibilityCheck();
   }
 
   visibilityCheck(forDiscovered=false) {
@@ -1602,6 +2056,16 @@ class DTActor {
     this.travelDirection.copy(dir);
   }
 
+  heal(amount, overheal=false) {
+    if (!this.isAlive()) return;
+
+    let pos = this.position.clone();
+    pos.y += 1.1;
+    makeDamagePopup(this, pos, amount);
+    if (overheal) this.hp += amount;
+    else this.hp = Math.min(this.hp + amount, this.actordef.hp);
+  }
+
   hurt(damage, source) {
     let pos = this.position.clone();
     pos.y += 1.1;
@@ -1618,6 +2082,8 @@ class DTActor {
   }
 
   die(gib = false) {
+    if (this.actordef.deathSound) this.actordef.deathSound.play();
+    if (this.infoElement) this.infoElement.remove();
     this._dead = true;
     this.setTile(null);
     if (gib && this.hasAnim("deathAnimX")) {
@@ -1761,6 +2227,9 @@ class UniformRoll {
   }
 }
 
+const ANYDOOM = ["doom.wad", "doom2.wad", "freedoom2.wad"];
+const OGDOOMS = ["doom.wad", "doom2.wad"];
+
 const Weapons = {
   Shotgun: {
     name: "Shotgun",
@@ -1770,6 +2239,8 @@ const Weapons = {
     damage: new UniformRoll(1, 2),
     bulletsPerShot: 5,
     shots: 1,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSSHOTGN"
   },
   PlasmaGun: {
     name: "Plasma Gun",
@@ -1779,6 +2250,8 @@ const Weapons = {
     damage: new UniformRoll(1, 3),
     bulletsPerShot: 1,
     shots: 3,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSPLASMA"
   },
   Minigun: {
     name: "Minigun",
@@ -1875,6 +2348,7 @@ const ActorDefs = {
     speed: 18,
     isProjectile: true,
     fullbright: true,
+    deathSoundName: "dsfirxpl",
     rawAnims: {
       idleAnim: [
         ["PLSS", "AB", 5]
@@ -1987,6 +2461,9 @@ const ActorDefs = {
         ["SARG", "N", -1],
       ]
     },
+    weapons: [
+      Weapons.PinkyBite
+    ]
   },
 
   Pinky: {
@@ -2110,6 +2587,91 @@ const ActorDefs = {
     speed: 24,
     isProjectile: true,
     rawAnims: HKPBBallRaws
+  },
+
+  HealthBonus: {
+    name: "Health Bonus",
+    from: ANYDOOM,
+    isItem: true,
+    onpickup: (actor) => {
+      if (actor.hp == actor.actordef.hp) return false;
+      actor.heal(4);
+      return true;
+    },
+    rawAnims: {
+      idleAnim: [
+        ["BON1", "ABCDCB", 6]
+      ]
+    }
+  },
+
+  RedCard: {
+    name: "Red Keycard",
+    from: ANYDOOM,
+    isItem: true,
+    onpickup: (actor) => {
+      g_GotRedCard = true;
+      return true;
+    },
+    rawAnims: {
+      idleAnim: [
+        ["RKEY", "AB", 10]
+      ]
+    }
+  },
+
+  ShotgunPickup: {
+    name: "Shotgun",
+    from: ANYDOOM,
+    isItem: true,
+    onpickup: (actor) => {
+      actor.pickupSpecialWeapon(Weapons.Shotgun);
+      return true;
+    },
+    rawAnims: {
+      idleAnim: [
+        ["SHOT", "A", -1]
+      ]
+    }
+  },
+
+  PlasmaPickup: {
+    name: "Plasma Rifle",
+    from: ANYDOOM,
+    isItem: true,
+    onpickup: (actor) => {
+      actor.pickupSpecialWeapon(Weapons.Shotgun);
+      return true;
+    },
+    rawAnims: {
+      idleAnim: [
+        ["PLAS", "A", -1]
+      ]
+    }
+  },
+
+  ChaingunPickup: {
+    name: "Chaingun",
+    from: ANYDOOM,
+    isItem: true,
+    onpickup: (actor) => {
+      actor.pickupSpecialWeapon(Weapons.Shotgun);
+      return true;
+    },
+    rawAnims: {
+      idleAnim: [
+        ["MGUN", "A", -1]
+      ]
+    }
+  }
+}
+
+function initWeaponDefs() {
+  for (let wepn in Weapons) {
+    let wep = Weapons[wepn];
+    if (wep.attackSoundName) {
+      wep.attackSound = Resources.get(wep.attackSoundFrom).getSound(wep.attackSoundName);
+    }
   }
 }
 
@@ -2119,15 +2681,14 @@ function initActorDefs() {
     let rawAnims = adef.rawAnims;
     if (adef.parsedAnims) continue; // already parsed
 
-    let wadres;
-    for (let wadname of adef.from) {
-      if (wadres = Resources.wads[wadname]) break;
-    }
+    let wadres = Resources.get(adef.from);
     if (!wadres) {
       console.warn("No resource WAD for actor " + adefname)
       adef.resourcesFound = false;
       continue;
     }
+
+    if (adef.deathSoundName) adef.deathSound = wadres.getSound(adef.deathSoundName);
 
     adef.resourcesFound = true;
 
@@ -2288,6 +2849,7 @@ function loadSpriteFromWad(wad, sprite, frame) {
 }
 
 let ui_CTHLabel = document.getElementById("CTHLabel");
+// let ui_HPLabel = document.getElementById("HPLabel");
 
 class CTHEstimate {
   constructor() {
@@ -2334,6 +2896,27 @@ CTHEstimate._raycaster = new THREE.Raycaster();
 CTHEstimate._intersected = [];
 const g_CTHEstimator = new CTHEstimate();
 
+function moveElementTo(element, position) {
+  let sp = position.clone();
+  toScreenspace(sp);
+
+  element.style.left = sp.x + "px";
+  element.style.top = sp.y + "px";
+}
+
+function updateActorHoverInfo(hoveredActor) {
+  let ahi = byId("ActorHoverInfo");
+  if (hoveredActor) {
+    let pos = hoveredActor.position.clone();
+    pos.y += TILE_Y * 4;
+    moveElementTo(ahi, pos);
+    // ui_HPLabel.innerText = `HP: ${hoveredActor.hp} / ${hoveredActor.actordef.hp}`;
+  } else {
+    ahi.style.left = -1000 + "px";
+    ahi.style.top = -1000 + "px";
+  }
+}
+
 function resetCTH(cth, resetLabel=true) {
   cth.reset();
   if (resetLabel) {
@@ -2344,18 +2927,11 @@ function resetCTH(cth, resetLabel=true) {
 function updateCTH(cth, attacker, victim, attackDef, updateLabel=true) {
   cth.update(attacker, victim, attackDef)
   if (updateLabel) {
-    let sp = victim.position.clone();
-    toScreenspace(sp);
-
-    let label = byId("CTHLabel");
-    label.style.left = sp.x + "px";
-    label.style.top = sp.y + "px";
-
     let text = "CTH ≈ " + Math.round(cth.getCTH() * 100) + "%";
     let friendlyCTH = Math.round(cth.getFriendlyCTH() * 100);
-    if (friendlyCTH > 0.001) text += " (" + friendlyCTH + "% friendly)";
-    text += `<br>HP: ${victim.hp} / ${victim.actordef.hp}`;
-    ui_CTHLabel.innerHTML = text;
+    if (friendlyCTH != cth.getFriendlyCTH()) text += " (" + friendlyCTH + "% friendly)";
+
+    ui_CTHLabel.innerText = text;
   }
 }
 
@@ -2368,19 +2944,22 @@ function aiAct() {
     atkDef.isMelee ?
     ai.tile.links.map(t => t.actor).filter(a => a) :
     g_World.actors;
-  let tgt = searchIn.find(a => {
+  let tgt;
+  for (let a of searchIn) {
     if (a.side != SIDE_AI && a.isAlive()) {
-      if (atkDef.isMelle) return true;
+      if (atkDef.isMelee) {
+        tgt = a;
+        break;
+      }
       let cth = new CTHEstimate();
-      cth.update(ai, a, atkDef, 300)
+      cth.update(ai, a, atkDef, 50)
       let shotMult = Math.max(((atkDef.shots || 1) + (atkDef.bulletsPerShot || 1)) * 0.75, 1);
       if (cth.getCTH() * shotMult >= 0.2 && cth.getFriendlyCTH() * shotMult < 0.25) {
-        return true;
+        tgt = a;
+        break;
       }
     }
-    return false;
-  });
-
+  }
 
   if (tgt) {
     g_TrackedActor = ai;
@@ -2407,11 +2986,13 @@ function aiAct() {
         }
       }
 
-      shortestPath.shift();
-      shortestPath.length = Math.min(ai.travelRange, shortestPath.length);
+      if (shortestPath) {
+        shortestPath.shift();
+        shortestPath.length = Math.min(ai.travelRange, shortestPath.length);
 
-      g_TrackedActor = ai;
-      g_CurrentAction = doTravel(ai, shortestPath);
+        g_TrackedActor = ai;
+        g_CurrentAction = doTravel(ai, shortestPath);
+      }
     }
   }
 }
@@ -2457,7 +3038,7 @@ function playerAct() {
         p.shift();
         let a = obj.dtacTile.actor;
         if (a && a.isAlive() && a !== g_SelectedActor) {
-          let atkDef = g_SelectedActor.actordef.weapons[0];
+          let atkDef = g_SelectedActor.getWeapon();
           g_CurrentAction = doAttack(g_SelectedActor, a, atkDef);
         } else {
           g_CurrentAction = doTravel(g_SelectedActor, p);
@@ -2465,8 +3046,9 @@ function playerAct() {
         g_SelectedActor.takeAction();
       }
       return;
-    } else if (obj.dtacActor && obj.dtacActor.isAlive() && obj.dtacActor.discovered) {
+    } else if (obj.dtacActor && obj.dtacActor.isAlive() && obj.dtacActor.discovered && !obj.dtacActor.actordef.isItem) {
       let a = obj.dtacActor;
+      updateActorHoverInfo(a);
       if (a.side == SIDE_PLAYER) {
         showHoverCursorAt(a.position, 0x00ff00);
         if (g_PlayerClicked) playerSelectActor(a);
@@ -2474,7 +3056,7 @@ function playerAct() {
         showHoverCursorAt(a.position, 0xff0000);
 
         if (g_PlayerClicked) {
-          let atkDef = g_SelectedActor.actordef.weapons[0];
+          let atkDef = g_SelectedActor.getWeapon();
           g_CurrentAction = doAttack(g_SelectedActor, a, atkDef);
           g_SelectedActor.takeAction();
         } else {
@@ -2482,7 +3064,7 @@ function playerAct() {
             resetCTH(g_CTHEstimator);
             g_CTHEstimator.actor = a;
           }
-          let atkDef = g_SelectedActor.actordef.weapons[0];
+          let atkDef = g_SelectedActor.getWeapon();
           updateCTH(g_CTHEstimator, g_SelectedActor, a, atkDef);
         }
       }
@@ -2518,8 +3100,8 @@ function loadMapdef() {
 }
 
 let g_ActorHoverCursor = (() => {
-  let box = new THREE.BoxGeometry(1, 1.5, 1);
-  box.translate(0, 0.75, 0);
+  let box = new THREE.BoxGeometry(1, 1.2, 1);
+  box.translate(0, 0.6, 0);
   let geom = new THREE.EdgesGeometry( box );
   let mat = new THREE.LineBasicMaterial({color: 0x00ff00, linewidth: 3, transparent: true, opacity: 0.25});
   mat.needsUpdate = true;
@@ -2800,6 +3382,7 @@ function mainLoop(currentTime) {
   this.lastCurrentTime = currentTime;
   requestAnimationFrame( mainLoop );
 
+  updateActorHoverInfo(null);
   updateDamagePopups(dt);
 
   for (let [obj, oldMat] of oldReachables) {
