@@ -3,7 +3,8 @@ const {Keys} = require("./keys.js");
 const {Maps} = require("./maps.js");
 const {degToRad, radToDeg, clamp} = THREE.Math;
 
-const OPTIMIZE_WORLD = false;
+const DEV = true;
+const OPTIMIZE_WORLD = !DEV;
 const TILE_X = 1.0, TILE_Y = 0.3, TILE_Z = 1.0;
 const SIDE_PLAYER = 0, SIDE_AI = 1;
 let g_CurrentSide = SIDE_PLAYER;
@@ -40,9 +41,10 @@ class DTDoomSound {
     player.feed(this.samples);
     player.flush();
     setTimeout(() => {
-      player.destroy();
-    },
-    (this.samples.length / this.sampleRate) * 1000 + 300)
+        player.destroy();
+      },
+      (this.samples.length / this.sampleRate) * 1000 + 300
+    )
   }
 }
 
@@ -158,13 +160,18 @@ const Resources = {
     let that = this;
 
     return new Promise(function(resolve, reject) {
+      let loadingEl = document.querySelector(".WadLoadingInfo");
+      let i = 0;
+      let dots = [".", "..", "..."];
       wadLocal.onProgress = function() {
-        console.info("Loading [" + url + "]...");
+        console.info("Loading [" + as + "]...");
+        loadingEl.innerText = `Loading [${as}]${dots[i++ % dots.length]}`;
       }
       wadLocal.onLoad = function() {
         window.wad = wadLocal; // write to global because wadjs is buggy
+        loadingEl.innerText = `Loaded [${as}]!`;
         if (wadLocal.errormsg) {
-          alert("Couldn't load WAD: " + wadLocal.errormsg);
+          loadingEl.innerText = "Couldn't load WAD: " + wadLocal.errormsg;
           reject(wadLocal.errormsg);
         } else {
           setTimeout(function() {
@@ -174,6 +181,62 @@ const Resources = {
       }
       wadLocal.loadURL(url)
     });
+  }
+}
+
+function reallyStart() {
+  initActorDefs();
+  initWeaponDefs();
+  initTileModelDefs();
+
+  g_World = new DTWorld();
+  let pos;
+  for (let actor of g_World.actors) {
+    actor.visibilityCheck()
+    if (!pos && actor.side == SIDE_PLAYER) { pos = actor.position; break}
+  }
+  g_MainCamera = new THREE.PerspectiveCamera( 20, window.innerWidth / window.innerHeight, 0.1, 1000 );
+  g_MainCamera.position.x = pos.x - 12;
+  g_MainCamera.position.z = pos.z - 12;
+  g_MainCamera.position.y = pos.y + 16;
+  g_MainCameraControls = new THREE.MapControls( g_MainCamera, g_Renderer.context.canvas );
+  g_MainCameraControls.minPolarAngle = degToRad(30);
+  g_MainCameraControls.maxPolarAngle = degToRad(85);
+  // g_MainCameraControls.enableDamping = true;
+  // g_MainCameraControls.dampingFactor = 0.20;
+  g_MainCameraControls.target.set(pos.x, pos.y, pos.z);
+  g_MainCameraControls.onBeforeUpdate = function() {
+    if (g_MainCameraControls._changedZoom()) g_MainCameraControlsZoomChanged = true;
+  }
+  // g_MainCameraControls = new THREE.OrbitControls( g_MainCamera );
+  moveEditModeGrid(0);
+  toggleMode(PLAY_MODE);
+
+  let wad = Resources.wads[BASE_WAD].wadjs;
+  let idx = wad.getLumpIndexByName("D_ULTIMA");
+  let typ = wad.detectLumpType(idx);
+  let data = wad.getLump(idx);
+  let mid;
+  if (typ == MUS) mid = mus2midi(data);
+  else mid = data;
+  let midblob = URL.createObjectURL(new Blob([mid]));
+  function playMusic() {
+    MIDIjs.play(midblob);
+    setTimeout(playMusic, 326000)
+  }
+  playMusic();
+
+  mainLoop();
+}
+
+function setErrorMsg(msgstr) {
+  let el = document.querySelector(".ErrorMessage")
+  if (el) {
+    el.classList.remove("NoDisplay")
+    let msg = el.querySelector(".MessageText");
+    if (msg) {
+      msg.innerText = "WebGL error: " + msgstr;
+    }
   }
 }
 
@@ -191,36 +254,22 @@ function start() {
   )
   .then(
     function() {
-      let wad = Resources.wads[BASE_WAD].wadjs;
-      let idx = wad.getLumpIndexByName("D_ULTIMA");
-      let typ = wad.detectLumpType(idx);
-      let data = wad.getLump(idx);
-      let mid;
-      if (typ == MUS) mid = mus2midi(data);
-      else mid = data;
-      let midblob = URL.createObjectURL(new Blob([mid]));
-      MIDIjs.play(midblob);
-
       let renderer;
       try {
         renderer = g_Renderer = new THREE.WebGLRenderer();
+        renderer.context.canvas.classList.add("DTCanvas");
       } catch (error) {
-        let el = document.querySelector(".ErrorMessage")
-        if (el) {
-          el.classList.remove("NoDisplay")
-          let msg = el.querySelector(".MessageText");
-          if (msg) {
-            msg.innerText = "WebGL error: " + (error instanceof Error ? error.message : error + "");
-          }
-        }
+        setErrorMsg(error instanceof Error ? error.message : error + "");
         throw error;
       }
 
       window.addEventListener( 'resize', onWindowResize, false );
 
       function onWindowResize(){
-        g_MainCamera.aspect = window.innerWidth / window.innerHeight;
-        g_MainCamera.updateProjectionMatrix();
+        if (g_MainCamera) {
+          g_MainCamera.aspect = window.innerWidth / window.innerHeight;
+          g_MainCamera.updateProjectionMatrix();
+        }
 
         renderer.setSize( window.innerWidth, window.innerHeight );
       }
@@ -230,37 +279,41 @@ function start() {
       renderer.shadowMap.type = THREE.PCFSoftShadowMap; // default THREE.PCFShadowMap
       document.body.appendChild( renderer.domElement );
 
-      initActorDefs();
-      initWeaponDefs();
-      initTileModelDefs();
+      document.querySelector(".WadDropZone").onclick = e => {
+        e.stopPropagation();
+      };
+      document.querySelector(".WadDropZone .FileInput").addEventListener('change', (e) => {
+        document.querySelector(".StartText").classList.add("NoDisplay")
+        e.preventDefault();
+        let i = 0;
+        // let fs = e.target.files[0];
+        let f = e.target.files[0];
+        function loadNext() {
+          if (true || i < fs.length) {
+            console.log('... file[' + i + '].name = ' + f.name);
+            let url = URL.createObjectURL(f);
+            let promise = Resources.loadWadFromURL(url, f.name);
+            promise.finally(function() {
+              document.querySelector(".StartText").classList.remove("NoDisplay")
+            });
+            i += 1;
+          }
+        }
+        loadNext();
+      });
 
-      g_World = new DTWorld();
-      let pos;
-      for (let actor of g_World.actors) {
-        actor.visibilityCheck()
-        if (!pos && actor.side == SIDE_PLAYER) pos = actor.position;
-      }
-      g_MainCamera = new THREE.PerspectiveCamera( 20, window.innerWidth / window.innerHeight, 0.1, 1000 );
-      g_MainCamera.position.x = pos.x - 12;
-      g_MainCamera.position.z = pos.z - 12;
-      g_MainCamera.position.y = pos.y + 16;
-      g_MainCameraControls = new THREE.MapControls( g_MainCamera, g_Renderer.context.canvas );
-      g_MainCameraControls.minPolarAngle = degToRad(30);
-      g_MainCameraControls.maxPolarAngle = degToRad(85);
-      // g_MainCameraControls.enableDamping = true;
-      // g_MainCameraControls.dampingFactor = 0.20;
-      g_MainCameraControls.target.set(8, 0, 8);
-      g_MainCameraControls.onBeforeUpdate = function() {
-        if (g_MainCameraControls._changedZoom()) g_MainCameraControlsZoomChanged = true;
-      }
-      // g_MainCameraControls = new THREE.OrbitControls( g_MainCamera );
-      moveEditModeGrid(0);
-      mainLoop();
+      document.querySelector(".StartText").classList.remove("NoDisplay");
+      document.body.onclick = (e) => {
+        if (g_Mode == MAIN_MENU_MODE &&
+            !document.querySelector(".StartText").classList.contains("NoDisplay")) {
+          reallyStart();
+        }
+      };
     },
     function() {
       let err = "Couldn't load base wad! (" + BASE_WAD + ")";
       console.error(err);
-      document.body.appendChild(err);
+      setErrorMsg(err);
     }
   );
 }
@@ -687,7 +740,8 @@ const TileModelDefs = {
   FloorStripesBars: {
     geom: FloorGeom(),
     matn: "AQF018",
-    walkable: true
+    walkable: true,
+    exit: true
   },
   FloorCompVents: {
     geom: FloorGeom(),
@@ -748,6 +802,30 @@ const TileModelDefs = {
     scaleS: 1.0,
     scaleT: 1.0,
     matn: ["SW12_5", "SW12_5", "SW12_5"],
+    blocks: []
+  },
+
+  baseGrayFullSide: {
+    geom: Box(0.2, TILE_Y * 4, 1.0, {zs: 2.0, zt: 0.5625}).translate(0.0, 0.0, 0.5 - 0.1),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["SW11_1", "SW11_1", "SW11_1"],
+    blocks: [SOUTH]
+  },
+
+  baseGrayHalfSide: {
+    geom: Box(0.2, TILE_Y * 2, 1.0, {zs: 2.0, zt: 0.5625 * 0.5}).translate(0.0, 0.0, 0.5 - 0.1),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["SW11_1", "SW11_1", "SW11_1"],
+    blocks: [SOUTH]
+  },
+
+  baseGrayQuarterSide: {
+    geom: Box(0.2, TILE_Y * 1, 1.0, {zs: 2.0, zt: 0.5625 * 0.25}).translate(0.0, 0.0, 0.5 - 0.1),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["SW11_1", "SW11_1", "SW11_1"],
     blocks: []
   },
 
@@ -830,6 +908,15 @@ const TileModelDefs = {
     scaleT: 1.0,
     matn: ["DOOR3_6", "DOORTRAK", "DOORTRAK"],
     isDoor: true,
+    blocks: []
+  },
+  FullRedDoor: {
+    geom: Box(1.0, TILE_Y * 4, 0.4),
+    scaleS: 1.0,
+    scaleT: 1.0,
+    matn: ["DOOR3_6", "DOORTRAK", "DOORTRAK"],
+    isDoor: true,
+    needsRedKey: true,
     blocks: []
   },
   MetalFullDoor: {
@@ -1119,6 +1206,7 @@ function spawnProjectile(def, owner, at, dir) {
   p.attackdef = def;
   g_World.addActor(p);
   faceTowards(p, p.position.clone().add(dir));
+  p.update(0);
   return p;
 }
 
@@ -1137,10 +1225,10 @@ function* doProcessProjectile(p) {
     oldPos.copy(p.position);
     let step = p.actordef.speed * dt
     let to = p.travelDirection.clone().multiplyScalar(step).add(p.position)
-    moveTowards(p.position, to, step);
     let dist = step;
     raycaster.far = dist;
     raycaster.set(p.position, p.travelDirection.clone().normalize());
+    moveTowards(p.position, to, step);
 
     intersected.length = 0;
     raycaster.intersectObjects(g_World.collidables, false, intersected);
@@ -1203,7 +1291,7 @@ function* doWait(time) {
   while(time > 0) time -= yield;
 }
 
-function* doAttack(actor, victim, attackDef) {
+function* doAttack(actor, victim, attackDef, specialWeapon) {
   if (actor === victim) {
     console.error("An actor can't attack itself");
     return;
@@ -1238,6 +1326,8 @@ function* doAttack(actor, victim, attackDef) {
       projectiles = callCombined(projectiles, dt);
     }
 
+    if (specialWeapon) specialWeapon.shots -= 1;
+
     if (attackDef.attackSound) attackDef.attackSound.play();
     for (let bullet = 0; bullet < attackDef.bulletsPerShot; bullet++) {
       let [pos, dir] = getPosAndDirForAttack(actor, victim, attackDef);
@@ -1256,7 +1346,9 @@ function* doTravel(actor, path) {
   for (let tile of path) {
     if (tile === actor.tile) continue;
     let tpos = tile.position.clone();
-    if (tile.hasDoor && !tile.isDoorOpen) yield* tile.doOpenDoor();
+    if (tile.hasDoor && !tile.isDoorOpen) {
+      yield* tile.doOpenDoor();
+    }
     // tpos.y += 0.5;
     yield* doCombined(
       doFaceTowards(actor, tpos, DEFAULT_ROTATION_SPEED),
@@ -1280,7 +1372,7 @@ class DTTile {
 
     if (tiledef.actor && tiledef.actor.def) {
       this.actordefActor = new DTActor(ActorDefs[tiledef.actor.def]);
-      this.actordefActor.discover();
+      this.actordefActor.discover(false);
       this.actordefActor.setPosition(this.position);
     }
 
@@ -1295,6 +1387,10 @@ class DTTile {
       for (let blockDir of tmd.blocks || []) {
         let d = rotDir(rot, blockDir);
         if (this.blocked.indexOf(d) == -1) this.blocked.push(d);
+      }
+
+      if (tmd.exit) {
+        this.isExit = true;
       }
 
       let renderObject = new THREE.Mesh(tmd.geom, tmd.mat);
@@ -1530,7 +1626,7 @@ class DTWorld {
     let scene = this.scene = new THREE.Scene();
     this.mapdef = mapdef;
     this.bbox = new THREE.Box3();
-    this.bbox.expandByPoint(new THREE.Vector3(0, 20, 0));
+    // this.bbox.expandByPoint(new THREE.Vector3(0, 20, 0));
     this.side = SIDE_AI;
     scene.add(g_ActorHoverCursor); // oops
 
@@ -1545,39 +1641,38 @@ class DTWorld {
     scene.add(sun.target);
     sun.target.position.set(-1, -1.5, -2.34);
 
-    let mydef = ActorDefs.Imp;//.resourcesFound ? ActorDefs.Imp : ActorDefs.Serpentipede;
-    let mydef2 = ActorDefs.HellKnight;//.resourcesFound ? ActorDefs.HellKnight : ActorDefs.PainBringer;
-    {
-      let actor;
-      // actor = new DTActor(mydef);
-      // actor.side = SIDE_PLAYER;
-      // actor.setTile(this.tileAt(3, 0, 3));
-      // this.addActor(actor);
+    // let mydef = ActorDefs.Imp;//.resourcesFound ? ActorDefs.Imp : ActorDefs.Serpentipede;
+    // let mydef2 = ActorDefs.HellKnight;//.resourcesFound ? ActorDefs.HellKnight : ActorDefs.PainBringer;
+    // {
+    //   let actor;
+    //   actor = new DTActor(mydef);
+    //   actor.side = SIDE_PLAYER;
+    //   actor.setTile(this.tileAt(3, 0, 3));
+    //   this.addActor(actor);
 
-      // actor = new DTActor(mydef);
-      // actor.side = SIDE_PLAYER;
-      // actor.setTile(this.tileAt(4, 0, 7));
-      // this.addActor(actor);
+    //   actor = new DTActor(mydef);
+    //   actor.side = SIDE_PLAYER;
+    //   actor.setTile(this.tileAt(4, 0, 7));
+    //   this.addActor(actor);
 
-      // actor = new DTActor(ActorDefs.FreedoomGuy);
-      // actor.side = SIDE_PLAYER;
-      // actor.setTile(this.tileAt(8, 0, 2));
-      // this.addActor(actor);
+    //   actor = new DTActor(ActorDefs.FreedoomGuy);
+    //   actor.side = SIDE_PLAYER;
+    //   actor.setTile(this.tileAt(8, 0, 2));
+    //   this.addActor(actor);
 
-      // actor = new DTActor(ActorDefs.DoomGuy);//.resourcesFound ? ActorDefs.DoomGuy : ActorDefs.FreedoomGuy);
-      // actor.side = SIDE_PLAYER;
-      // actor.setTile(this.tileAt(10, 0, 2));
-      // this.addActor(actor);
-    }
+    //   actor = new DTActor(ActorDefs.DoomGuy);//.resourcesFound ? ActorDefs.DoomGuy : ActorDefs.FreedoomGuy);
+    //   actor.side = SIDE_PLAYER;
+    //   actor.setTile(this.tileAt(10, 0, 2));
+    //   this.addActor(actor);
+    // }
 
-    let enemydef = ActorDefs.Serpentipede;
-    {
-      let actor2;
-      actor2 = new DTActor(ActorDefs.Pinky);
-      actor2.setTile(this.tileAt(12, 0, 4));
-      actor2.side = SIDE_AI;
-      this.addActor(actor2);
-    }
+    // {
+    //   let actor2;
+    //   actor2 = new DTActor(ActorDefs.Baron);
+    //   actor2.setTile(this.tileAt(8, 0, 4));
+    //   actor2.side = SIDE_AI;
+    //   this.addActor(actor2);
+    // }
 
     if (OPTIMIZE_WORLD) {
       this.optimize();
@@ -1765,6 +1860,7 @@ class DTActor {
       }
     }
     this.actordef = actordef;
+    this.painLastPlayed = 0;
 
     this.hp = this.maxHp;
     if ("sideOverride" in actordef) this.side = actordef.sideOverride;
@@ -1819,6 +1915,7 @@ class DTActor {
     this.facing = 0;
     let facingDir = new THREE.Vector3( 0, 0, 1 );
     let facingArrow = new THREE.ArrowHelper(facingDir, new THREE.Vector3(0, 0, 0), 0.5);
+    facingArrow.visible = false;
 
     this.object = new THREE.Group();
     this.object.dtacActor = this;
@@ -1845,21 +1942,25 @@ class DTActor {
     if (this.discovered) this.discover();
   }
 
+  get isItem() {
+    return this.actordef && this.actordef.isItem;
+  }
+
   getWeapon() {
     let sp = this.specialWeapon;
     if (sp && sp.shots > 0) return sp.def;
     return this.actordef.weapons[0];
   }
 
-  pickupSpecialWeapon(def) {
+  pickupSpecialWeapon(def, shots=def.shots * 9) {
     if (this.specialWeapon && this.specialWeapon.def == def) {
       this.specialWeapon = {
-        shots: 8 + this.specialWeapon.shots,
+        shots: shots + this.specialWeapon.shots,
         def: def
       };
     } else {
       this.specialWeapon = {
-        shots: 8,
+        shots: shots,
         def: def
       };
     }
@@ -1869,15 +1970,18 @@ class DTActor {
     return this.actordef.hp || 1;
   }
 
-  discover() {
+  discover(playSound=true) {
+    if (playSound && !this.discovered && this.actordef.sightSounds) choose(this.actordef.sightSounds).play();
     this.discovered = true;
     this.renderObject.visible = true;
     if (this.renderObjectBehind) this.renderObjectBehind.visible = true;
     if (this.infoElement) this.infoElement.style.display = "block";
   }
 
+  get maxActions() { return 2; }
+
   resetActions() {
-    this.actionsLeft = 2;
+    this.actionsLeft = this.maxActions;
   }
 
   get travelRange() {
@@ -2007,7 +2111,8 @@ class DTActor {
     if (!this.actordef.isItem) this.visibilityCheck();
   }
 
-  visibilityCheck(forDiscovered=false) {
+  visibilityCheck(forDiscovered=0) {
+    if (forDiscovered > 1) return;
     if ((forDiscovered || this.side == SIDE_PLAYER) && g_World) {
       let pos = new THREE.Vector3(), dir = new THREE.Vector3();
       let intersected = [];
@@ -2024,7 +2129,7 @@ class DTActor {
             if (!dtacActor) break;
             if (dtacActor == actor) {
               actor.discover();
-              actor.visibilityCheck(true);
+              actor.visibilityCheck(forDiscovered + 1);
               break;
             }
           }
@@ -2072,8 +2177,15 @@ class DTActor {
     makeDamagePopup(this, pos, -damage);
     this.hp -= damage;
     if (this.hp <= 0) this.die(this.hp < -3);
-    else if (this.hasAnim("painAnim")) {
-      this.playAnim("painAnim");
+    else {
+      let now = performance.now();
+      if ((now - this.painLastPlayed) > 500 && this.actordef.painSounds) {
+        this.painLastPlayed = now;
+        choose(this.actordef.painSounds).play();
+      }
+      if (this.hasAnim("painAnim")) {
+        this.playAnim("painAnim");
+      }
     }
   }
 
@@ -2082,7 +2194,7 @@ class DTActor {
   }
 
   die(gib = false) {
-    if (this.actordef.deathSound) this.actordef.deathSound.play();
+    if (this.actordef.deathSounds) choose(this.actordef.deathSounds).play();
     if (this.infoElement) this.infoElement.remove();
     this._dead = true;
     this.setTile(null);
@@ -2135,6 +2247,30 @@ const ImpSerpBallRaws = {
   ],
   deathAnim: [
     ["BAL1", "CDE", 6]
+  ]
+}
+
+const BaronPLRaws = {
+  idleAnim: [
+    ["BOSS", "AB", 12]
+  ],
+  walkAnim: [
+    ["BOSS", "ABCD", 4, "travel"]
+  ],
+  attackAnim: [
+    ["BOSS", "EF", 8],
+    ["BOSS", "G", 6, "attack"]
+  ],
+  painAnim: [
+    ["BOSS", "H", 8, "pain"]
+  ],
+  deathAnim: [
+    ["BOSS", "I", 8],
+    ["BOSS", "J", 8, "deathscream"],
+    ["BOSS", "K", 6],
+    ["BOSS", "L", 6, "noblocking"],
+    ["BOSS", "MN", 8],
+    ["BOSS", "O", -1],
   ]
 }
 
@@ -2227,6 +2363,14 @@ class UniformRoll {
   }
 }
 
+const WEAPON_PICKUP_SOUND = "DSWPNUP";
+const POWERUP_PICKUP_SOUND = "DSGETPOW";
+const ITEM_PICKUP_SOUND = "DSITEMUP";
+function playSound(name) {
+  let sound = Resources.get(ANYDOOM).getSound(name);
+  if (sound) sound.play();
+}
+
 const ANYDOOM = ["doom.wad", "doom2.wad", "freedoom2.wad"];
 const OGDOOMS = ["doom.wad", "doom2.wad"];
 
@@ -2249,7 +2393,7 @@ const Weapons = {
     verticalSpread: 4,
     damage: new UniformRoll(1, 3),
     bulletsPerShot: 1,
-    shots: 3,
+    shots: 4,
     attackSoundFrom: ANYDOOM,
     attackSoundName: "DSPLASMA"
   },
@@ -2260,16 +2404,20 @@ const Weapons = {
     verticalSpread: 8,
     damage: new UniformRoll(1, 2),
     bulletsPerShot: 1,
-    shots: 8,
+    shots: 9,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSPISTOL"
   },
   Rifle: {
     name: "Rifle",
     projectile: "GenericBullet",
     horizontalSpread: 5,
     verticalSpread: 5,
-    damage: new UniformRoll(3, 5),
+    damage: new UniformRoll(2, 4),
     bulletsPerShot: 1,
     shots: 1,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSPISTOL"
   },
 
   ImpBall: {
@@ -2280,6 +2428,8 @@ const Weapons = {
     damage: new UniformRoll(2, 4),
     bulletsPerShot: 1,
     shots: 1,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSFIRSHT"
   },
   SerpentipedeBall: {
     name: "Serpentipede Ball",
@@ -2289,6 +2439,19 @@ const Weapons = {
     damage: new UniformRoll(2, 4),
     bulletsPerShot: 1,
     shots: 1,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSFIRSHT"
+  },
+  BaronBall: {
+    name: "Baron Ball",
+    projectile: "BaronBall",
+    horizontalSpread: 7,
+    verticalSpread: 4,
+    damage: new UniformRoll(3, 7),
+    bulletsPerShot: 2,
+    shots: 1,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSFIRSHT"
   },
   HellKnightBall: {
     name: "Hell Knight Ball",
@@ -2298,6 +2461,8 @@ const Weapons = {
     damage: new UniformRoll(3, 5),
     bulletsPerShot: 1,
     shots: 1,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSFIRSHT"
   },
   PainBringerBall: {
     name: "Pain Bringer Ball",
@@ -2307,12 +2472,16 @@ const Weapons = {
     damage: new UniformRoll(3, 5),
     bulletsPerShot: 1,
     shots: 1,
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSFIRSHT"
   },
   PinkyBite: {
     name: "Bite",
     projectile: null,
     isMelee: true,
     damage: new UniformRoll(3, 5),
+    attackSoundFrom: ANYDOOM,
+    attackSoundName: "DSSGTATK"
   }
 }
 
@@ -2323,9 +2492,13 @@ const ActorDefs = {
     sideOverride: SIDE_PLAYER,
     hp: 21,
     travelRange: 4,
+
+    painSoundName: "dsplpain",
+    deathSoundName: "dspldeth",
+
     rawAnims: PlayerRaws,
     weapons: [
-      Weapons.PlasmaGun
+      Weapons.Rifle
     ]
   },
 
@@ -2336,9 +2509,13 @@ const ActorDefs = {
     sideOverride: SIDE_PLAYER,
     hp: 21,
     travelRange: 4,
+
+    painSoundName: "dsplpain",
+    deathSoundName: "dspldeth",
+
     rawAnims: PlayerRaws,
     weapons: [
-      Weapons.Shotgun
+      Weapons.Rifle
     ]
   },
 
@@ -2348,7 +2525,9 @@ const ActorDefs = {
     speed: 18,
     isProjectile: true,
     fullbright: true,
+
     deathSoundName: "dsfirxpl",
+
     rawAnims: {
       idleAnim: [
         ["PLSS", "AB", 5]
@@ -2364,6 +2543,12 @@ const ActorDefs = {
     from: ["doom.wad", "doom2.wad", "freedoom2.wad"],
     travelRange: 3,
     hp: 7,
+
+    sightSoundName: ["dsposit1", "dsposit2", "dsposit3"],
+    activeSoundName: "dsposact",
+    painSoundName: "dspopain",
+    deathSoundName: ["dspodth1", "dspodth2", "dspodth3"],
+
     rawAnims: {
       idleAnim: [
         ["POSS", "AB", 12]
@@ -2401,6 +2586,12 @@ const ActorDefs = {
     from: ["doom.wad", "doom2.wad", "freedoom2.wad"],
     travelRange: 3,
     hp: 9,
+
+    sightSoundName: ["dsposit1", "dsposit2", "dsposit3"],
+    activeSoundName: "dsposact",
+    painSoundName: "dspopain",
+    deathSoundName: ["dspodth1", "dspodth2", "dspodth3"],
+
     rawAnims: {
       idleAnim: [
         ["SPOS", "AB", 12]
@@ -2438,6 +2629,12 @@ const ActorDefs = {
     from: ["freedoom2.wad"],
     hp: 12,
     travelRange: 4,
+
+    sightSoundName: "dssgtsit",
+    activeSoundName: "dsdmact",
+    painSoundName: "dsdmpain",
+    deathSoundName: "dssgtdth",
+
     rawAnims: {
       idleAnim: [
         ["SARG", "AB", 12]
@@ -2472,6 +2669,12 @@ const ActorDefs = {
     replaceWith: "FleshWorm",
     hp: 12,
     travelRange: 4,
+
+    sightSoundName: "dssgtsit",
+    activeSoundName: "dsdmact",
+    painSoundName: "dsdmpain",
+    deathSoundName: "dssgtdth",
+
     rawAnims: {
       idleAnim: [
         ["SARG", "AB", 12]
@@ -2505,6 +2708,12 @@ const ActorDefs = {
     from: ["freedoom2.wad"],
     travelRange: 4,
     hp: 12,
+
+    sightSoundName: ["dsbgsit1", "dsbgsit2"],
+    activeSoundName: "dsbgact",
+    painSoundName: "dspopain",
+    deathSoundName: ["dsbgdth1", "dsbgdth2"],
+
     rawAnims: ImpSerpRaws,
     weapons: [
       Weapons.SerpentipedeBall
@@ -2525,6 +2734,12 @@ const ActorDefs = {
     replaceWith: "Serpentipede",
     travelRange: 4,
     hp: 12,
+
+    sightSoundName: ["dsbgsit1", "dsbgsit2"],
+    activeSoundName: "dsbgact",
+    painSoundName: "dspopain",
+    deathSoundName: ["dsbgdth1", "dsbgdth2"],
+
     rawAnims: ImpSerpRaws,
     weapons: [
       Weapons.ImpBall
@@ -2540,12 +2755,72 @@ const ActorDefs = {
     rawAnims: ImpSerpBallRaws
   },
 
+  Baron: {
+    name: "Baron of Hell",
+    from: ["doom.wad", "doom2.wad"],
+    replaceWith: "PainLord",
+    travelRange: 4,
+    hp: 36,
+
+    sightSoundName: "dsbrssit",
+    activeSoundName: "dsdmact",
+    painSoundName: "dsdmpain",
+    deathSoundName: "dskntdth",
+
+    weapons: [
+      Weapons.BaronBall
+    ],
+    rawAnims: BaronPLRaws,
+  },
+
+  PainLord: {
+    name: "Pain Lord",
+    from: ["freedoom.wad", "freedoom2.wad"],
+    travelRange: 4,
+    hp: 36,
+
+    sightSoundName: "dsbrssit",
+    activeSoundName: "dsdmact",
+    painSoundName: "dsdmpain",
+    deathSoundName: "dskntdth",
+
+    weapons: [
+      Weapons.BaronBall
+    ],
+    rawAnims: BaronPLRaws,
+  },
+
+  BaronBall: {
+    name: "Baron Ball",
+    from: ANYDOOM,
+    fullbright: true,
+    speed: 8,
+    isProjectile: true,
+    deathSoundName: "dsfirxpl",
+    rawAnims: HKPBBallRaws,
+  },
+
+  HellKnightBall: {
+    name: "Hell Knight Ball",
+    from: ANYDOOM,
+    fullbright: true,
+    speed: 8,
+    isProjectile: true,
+    rawAnims: HKPBBallRaws,
+  },
+
   HellKnight: {
     name: "Hell Knight",
     from: ["doom2.wad"],
     replaceWith: "PainBringer",
     travelRange: 4,
     hp: 24,
+
+    sightSoundName: "dskntsit",
+    activeSoundName: "dsdmact",
+    painSoundName: "dsdmpain",
+    deathSoundName: "dskntdth",
+
     weapons: [
       Weapons.HellKnightBall
     ],
@@ -2566,6 +2841,12 @@ const ActorDefs = {
     from: ["freedoom2.wad"],
     travelRange: 4,
     hp: 24,
+
+    sightSoundName: "dskntsit",
+    activeSoundName: "dsdmact",
+    painSoundName: "dsdmpain",
+    deathSoundName: "dskntdth",
+
     weapons: [
       Weapons.PainBringerBall
     ],
@@ -2585,8 +2866,17 @@ const ActorDefs = {
     name: "Bullet",
     from: ["freedoom2.wad"],
     speed: 24,
+    fullbright: true,
     isProjectile: true,
-    rawAnims: HKPBBallRaws
+    // rawAnims: HKPBBallRaws
+    rawAnims: {
+      idleAnim: [
+        ["PUFF", "A", 4]
+      ],
+      deathAnim: [
+        ["PUFF", "BCD", 2]
+      ]
+    }
   },
 
   HealthBonus: {
@@ -2595,6 +2885,7 @@ const ActorDefs = {
     isItem: true,
     onpickup: (actor) => {
       if (actor.hp == actor.actordef.hp) return false;
+      playSound(POWERUP_PICKUP_SOUND);
       actor.heal(4);
       return true;
     },
@@ -2610,8 +2901,12 @@ const ActorDefs = {
     from: ANYDOOM,
     isItem: true,
     onpickup: (actor) => {
-      g_GotRedCard = true;
-      return true;
+      if (!g_GotRedCard) {
+        g_GotRedCard = true;
+        playSound(ITEM_PICKUP_SOUND);
+        return true;
+      }
+      return false;
     },
     rawAnims: {
       idleAnim: [
@@ -2626,6 +2921,7 @@ const ActorDefs = {
     isItem: true,
     onpickup: (actor) => {
       actor.pickupSpecialWeapon(Weapons.Shotgun);
+      playSound(WEAPON_PICKUP_SOUND);
       return true;
     },
     rawAnims: {
@@ -2640,7 +2936,8 @@ const ActorDefs = {
     from: ANYDOOM,
     isItem: true,
     onpickup: (actor) => {
-      actor.pickupSpecialWeapon(Weapons.Shotgun);
+      actor.pickupSpecialWeapon(Weapons.PlasmaGun);
+      playSound(WEAPON_PICKUP_SOUND);
       return true;
     },
     rawAnims: {
@@ -2651,11 +2948,12 @@ const ActorDefs = {
   },
 
   ChaingunPickup: {
-    name: "Chaingun",
+    name: "Minigun",
     from: ANYDOOM,
     isItem: true,
     onpickup: (actor) => {
-      actor.pickupSpecialWeapon(Weapons.Shotgun);
+      actor.pickupSpecialWeapon(Weapons.Minigun);
+      playSound(WEAPON_PICKUP_SOUND);
       return true;
     },
     rawAnims: {
@@ -2676,6 +2974,14 @@ function initWeaponDefs() {
 }
 
 function initActorDefs() {
+  function makeSounds(wadres, soundNames) {
+    let results = [];
+    for (let name of (soundNames instanceof Array ? soundNames : [soundNames])) {
+      results.push(wadres.getSound(name));
+    }
+    return results;
+  }
+
   for (let adefname in ActorDefs) {
     let adef = ActorDefs[adefname];
     let rawAnims = adef.rawAnims;
@@ -2688,7 +2994,10 @@ function initActorDefs() {
       continue;
     }
 
-    if (adef.deathSoundName) adef.deathSound = wadres.getSound(adef.deathSoundName);
+    if (adef.deathSoundName) adef.deathSounds = makeSounds(wadres, adef.deathSoundName);
+    if (adef.painSoundName) adef.painSounds = makeSounds(wadres, adef.painSoundName);
+    if (adef.sightSoundName) adef.sightSounds = makeSounds(wadres, adef.sightSoundName);
+    if (adef.activeSoundName) adef.activeSounds = makeSounds(wadres, adef.activeSoundName);
 
     adef.resourcesFound = true;
 
@@ -2766,8 +3075,8 @@ window.addEventListener( 'mousemove', function ( event ) {
 
   window.addEventListener( 'keyup', function (event) {
     g_KeysReleased.push(event.which);
-    if (event.which == Keys.E) {
-      toggleMode();
+    if (DEV && event.which == Keys.E) {
+      toggleMode(g_Mode == PLAY_MODE ? EDIT_MODE : PLAY_MODE);
     } else if (g_Mode == EDIT_MODE) {
       if (event.which == Keys.A) {
         moveEditModeGrid(+1);
@@ -2861,6 +3170,7 @@ class CTHEstimate {
     this.hits = 0;
     this.friendlyHits = 0;
     this.actor = null;
+    this.hasDirectLOS = false;
   }
 
   getCTH() { return this.hits / this.checks; }
@@ -2870,8 +3180,19 @@ class CTHEstimate {
     let raycaster = CTHEstimate._raycaster;
     let intersected = CTHEstimate._intersected;
     intersected.length = 0;
-
     let pos = new THREE.Vector3(), dir = new THREE.Vector3();
+
+    getPosAndDirForAttack(attacker, victim, null, pos, dir);
+    raycaster.set(pos, dir);
+    raycaster.intersectObjects( g_World.collidables, false, intersected );
+    for (let data of intersected) {
+      const int = data.object;
+      if (int.dtacActor === attacker || (int.dtacActor && !int.dtacActor.isAlive())) continue;
+      if (int.dtacActor === victim) this.hasDirectLOS = true;
+      break;
+    }
+
+    intersected.length = 0;
     for (let i = samples; i--;) {
       getPosAndDirForAttack(attacker, victim, attackDef, pos, dir);
       raycaster.set(pos, dir);
@@ -2954,7 +3275,7 @@ function aiAct() {
       let cth = new CTHEstimate();
       cth.update(ai, a, atkDef, 50)
       let shotMult = Math.max(((atkDef.shots || 1) + (atkDef.bulletsPerShot || 1)) * 0.75, 1);
-      if (cth.getCTH() * shotMult >= 0.2 && cth.getFriendlyCTH() * shotMult < 0.25) {
+      if (cth.hasDirectLOS && cth.getCTH() * shotMult >= 0.2 && cth.getFriendlyCTH() * shotMult < 0.25) {
         tgt = a;
         break;
       }
@@ -2997,12 +3318,47 @@ function aiAct() {
   }
 }
 
+function updateSelectedActorUI() {
+  let actor = g_SelectedActor;
+  let el = document.body.querySelector(".SelectedActorInfo");
+  let hp = el.querySelector(".HPValue")
+  let wep = el.querySelector(".WeaponValue")
+  let actions = el.querySelector(".ActionsValue")
+
+  hp.innerText = (actor ? actor.hp + " / " + actor.maxHp : "N/A");
+  let wepstr = "";
+  if (actor) {
+    wepstr += actor.getWeapon().name;
+    wepstr += ` (`
+    if (actor.specialWeapon && actor.getWeapon() == actor.specialWeapon.def) {
+      wepstr += `${actor.specialWeapon.shots} shots left`;
+    } else {
+      wepstr += 'unlimited ammo';
+    }
+    wepstr += ')';
+  }
+  wep.innerText = wepstr;
+  actions.innerText = (actor ? `${actor.actionsLeft} / ${actor.maxActions}` : "N/A");
+}
+
 function playerSelectActor(actor) {
+  if (actor && actor.actionsLeft == 0) {
+    // showMessage("No actions left.");
+    return false;
+  }
   g_SelectedActor = actor;
   g_TrackedActor = actor;
   g_MainCameraLerping = true;
   g_SelectedActorReachables = null;
+  updateSelectedActorUI();
   resetCTH(g_CTHEstimator);
+}
+
+function anyEnemiesDiscovered() {
+  for (let a of g_World.actors) {
+    if (a.side == SIDE_AI && a.isAlive() && !a.isItem && a.discovered) return true;
+  }
+  return false;
 }
 
 let oldReachables = [];
@@ -3039,11 +3395,11 @@ function playerAct() {
         let a = obj.dtacTile.actor;
         if (a && a.isAlive() && a !== g_SelectedActor) {
           let atkDef = g_SelectedActor.getWeapon();
-          g_CurrentAction = doAttack(g_SelectedActor, a, atkDef);
+          g_CurrentAction = doAttack(g_SelectedActor, a, atkDef, g_SelectedActor.specialWeapon);
         } else {
           g_CurrentAction = doTravel(g_SelectedActor, p);
         }
-        g_SelectedActor.takeAction();
+        if (anyEnemiesDiscovered()) g_SelectedActor.takeAction();
       }
       return;
     } else if (obj.dtacActor && obj.dtacActor.isAlive() && obj.dtacActor.discovered && !obj.dtacActor.actordef.isItem) {
@@ -3057,8 +3413,8 @@ function playerAct() {
 
         if (g_PlayerClicked) {
           let atkDef = g_SelectedActor.getWeapon();
-          g_CurrentAction = doAttack(g_SelectedActor, a, atkDef);
-          g_SelectedActor.takeAction();
+          g_CurrentAction = doAttack(g_SelectedActor, a, atkDef, g_SelectedActor.specialWeapon);
+          if (anyEnemiesDiscovered()) g_SelectedActor.takeAction();
         } else {
           if (a !== g_CTHEstimator.actor) {
             resetCTH(g_CTHEstimator);
@@ -3125,8 +3481,8 @@ let g_TrackedActor;
 let g_MainCameraLerping = false;
 let g_TurnCount = 0;
 
-const PLAY_MODE = 0, EDIT_MODE = 1;
-let g_Mode = PLAY_MODE;
+const PLAY_MODE = 0, EDIT_MODE = 1, MAIN_MENU_MODE = 2, END_MODE = 3;
+let g_Mode = MAIN_MENU_MODE;
 
 const GRID_Y_OFFSET = 0.015;
 let g_EditModeGrid = new THREE.Group();
@@ -3149,15 +3505,19 @@ function moveEditModeGrid(by) {
   // g_MainCamera.position.y = g_EditModeGridY * TILE_Y + GRID_Y_OFFSET + 12.5;
 }
 
-function toggleMode() {
+function toggleMode(newmode) {
   removePreviewTile();
   document.body.classList.remove("edit-mode");
-  if (g_Mode == EDIT_MODE) {
+  document.body.classList.remove("play-mode");
+  document.body.classList.remove("main-menu");
+  document.body.classList.remove("end-mode");
+  g_World.scene.remove(g_EditModeGrid);
+  if (newmode == PLAY_MODE) {
+    document.body.classList.add("play-mode");
     g_Mode = PLAY_MODE;
-    g_World.scene.remove(g_EditModeGrid);
     g_World.actordefPreviews.forEach(a => a.object.visible = false);
     g_World.actors.forEach(a => a.object.visible = true);
-  } else if (g_Mode == PLAY_MODE) {
+  } else if (newmode == EDIT_MODE) {
     document.body.classList.add("edit-mode");
     if (g_EditModeSelectedDefType == "tile") resetPreviewTile();
     g_World.scene.add(g_EditModeGrid);
@@ -3165,6 +3525,9 @@ function toggleMode() {
     g_World.actors.forEach(a => a.object.visible = false);
     g_Mode = EDIT_MODE;
     moveEditModeGrid(0);
+  } else if (newmode == END_MODE) {
+    document.body.classList.add("end-mode");
+    g_Mode = END_MODE;
   } else {
     throw "Unknown mode: " + g_Mode;
   }
@@ -3311,6 +3674,12 @@ function editMode(dt) {
   }
 }
 
+function endGame(message) {
+  let el = document.querySelector(".EndGameMessage");
+  if (el) el.innerText = message || "Game Over";
+  toggleMode(END_MODE);
+}
+
 function playMode(dt) {
   let justFinishedAnAction = false;
   if (g_CurrentAction) {
@@ -3319,6 +3688,42 @@ function playMode(dt) {
     if (r.done) {
       g_CurrentAction = null;
       justFinishedAnAction = true;
+    }
+  }
+
+  let allDead = true;
+  let allOnExit = true;
+  for (let a of g_World.actors) {
+    if (a.side == SIDE_PLAYER) {
+      if (a.isAlive()) {
+        allDead = false;
+        if (!a.tile.isExit) {
+          allOnExit = false;
+          break;
+        }
+      }
+    }
+  }
+
+  if (allDead) {
+    endGame("Game Over");
+    return;
+  }
+
+  if (allOnExit && g_GotRedCard) {
+    endGame("A winner is you!");
+    return;
+  }
+
+
+  if (g_CurrentSide == SIDE_PLAYER) {
+    updateSelectedActorUI();
+    if (justFinishedAnAction && !anyEnemiesDiscovered()) {
+      for (let a of g_World.actors) {
+        if (a.side == SIDE_PLAYER && a.isAlive) {
+          a.resetActions();
+        }
+      }
     }
   }
 
@@ -3334,6 +3739,12 @@ function playMode(dt) {
     if (allActed) {
       g_TurnCount += 1;
       g_CurrentSide = g_CurrentSide === SIDE_PLAYER ? SIDE_AI : SIDE_PLAYER;
+
+      if (g_CurrentSide == SIDE_PLAYER) {
+        document.body.classList.remove("enemy-turn")
+      } else {
+        document.body.classList.add("enemy-turn")
+      }
 
       for (let a of g_World.actors) {
         a.resetActions();
@@ -3393,6 +3804,8 @@ function mainLoop(currentTime) {
 
   if (g_Mode == PLAY_MODE) {
     playMode(dt);
+  } else if (g_Mode == MAIN_MENU_MODE) {
+
   } else if (g_Mode == EDIT_MODE) {
     editMode(dt);
   }
@@ -3401,7 +3814,7 @@ function mainLoop(currentTime) {
   g_MainCameraControlsZoomChanged = false;
   g_MainCameraControls.update();
 
-  g_Renderer.render( g_World.scene, g_MainCamera );
+  if (g_Mode != END_MODE) g_Renderer.render( g_World.scene, g_MainCamera );
 
   g_KeysPressed.length = 0;
   g_KeysReleased.length = 0;

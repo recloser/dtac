@@ -4,7 +4,6 @@
     <meta charset="utf-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <title>D-Tac</title>
-    <!-- <script type="text/javascript" src="https://code.jquery.com/jquery-1.11.0.min.js"></script> -->
     <script type="text/javascript" src="node_modules/pcm-player/pcm-player.min.js"></script>
     <script type="text/javascript" src="three.js"></script>
     <script type="text/javascript" src="lib/midi.js"></script>
@@ -41,7 +40,7 @@
             display: flex;
             margin: 0 auto;
             padding: 0 auto;
-            background-color: gray;
+            background-color: black;
             overflow: hidden;
         }
 
@@ -57,9 +56,12 @@
             font-family: sans-serif;
             /* text-shadow: 1px 1px black; */
             padding: 4px;
+
+            z-index: 1;
+            white-space: nowrap;
         }
 
-        .edit-mode .ActorHoverInfo {
+        body:not(.play-mode) .ActorHoverInfo {
             display: none !important;
         }
 
@@ -131,14 +133,154 @@
             color: black;
             background-color: white;
             border: 2px solid red;
+            z-index: 10;
         }
 
         .NoDisplay {
             display: none;
         }
+
+        .SelectedActorInfo {
+            position: absolute;
+            bottom: 1em;
+            left: 1em;
+            font-family: sans-serif;
+            color: white;
+            padding: 1.2em;
+            pointer-events: none;
+            display: none;
+            border-radius: 10px;
+            background-color: rgba(18, 24, 48, 0.7);
+            z-index: 10;
+        }
+
+        .enemy-turn .SelectedActorInfo {
+            display: none;
+        }
+
+        .SelectedActorInfo .Label {
+            color: #999;
+            font-size: 2.3em;
+            font-variant-caps: all-small-caps;
+            font-style: italic;
+        }
+
+        .SelectedActorInfo .Value {
+            font-size: 2.5em;
+            color: #EEE;
+        }
+
+        .play-mode .SelectedActorInfo {
+            display: initial;
+        }
+
+        .EnemyTurnText {
+            position: absolute;
+            color: red;
+            font-size: 2.5em;
+            font-family: sans-serif;
+            font-weight: bold;
+            display: none;
+            left: 3em;
+            top: 3em;
+            /* transform: translate(-50%, 0%); */
+            text-shadow: 2px 0px black, 0px -2px black, 0px 2px black, -2px 0px black;
+        }
+
+        .enemy-turn:not(.end-mode) .EnemyTurnText {
+            display: initial;
+        }
+
+        .TitleText {
+            font-size: 10em;
+            position: absolute;
+            color: white;
+            font-family: sans-serif;
+            font-weight: bold;
+            font-variant-caps: small-caps;
+            pointer-events: none;
+            user-select: none;
+            left: 50%;
+            top: 20%;
+            transform: translate(-50%, -50%) perspective(400px) rotateX(40deg);
+            text-shadow: 2px 0px black, 0px -2px black, 0px 2px black, -2px 0px black;
+        }
+
+        .StartText {
+            font-size: 2em;
+            position: absolute;
+            color: white;
+            font-family: sans-serif;
+            /* font-weight: bold; */
+            /* font-variant-caps: small-caps; */
+            pointer-events: none;
+            user-select: none;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            text-shadow: 2px 0px black, 0px -2px black, 0px 2px black, -2px 0px black;
+        }
+
+        .WadDropZone {
+            width: 30em;
+            font-size: 1.5em;
+            position: absolute;
+            color: black;
+            font-family: sans-serif;
+            /* font-weight: bold; */
+            /* font-variant-caps: small-caps; */
+            background-color: #AAA;
+            left: 50%;
+            bottom: 5%;
+            padding: 1em;
+            transform: translate(-50%, -50%);
+            border-radius: 10px;
+            user-select: none;
+            /* text-shadow: 2px 0px black, 0px -2px black, 0px 2px black, -2px 0px black; */
+        }
+
+        body:not(.main-menu) .WadDropZone {
+            display: none;
+        }
+
+        .VisibleInMainMenu {
+            transition: 0.75s opacity;
+            opacity: 0;
+        }
+
+        .main-menu .VisibleInMainMenu {
+            opacity: 1;
+        }
+
+        .EndGameMessage {
+            font-size: 3em;
+            font-family: sans-serif;
+            font-style: italic;
+            color: white;
+            text-shadow: 2px 2px black;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            opacity: 0;
+            transition: opacity 7.5s;
+        }
+
+        .end-mode .EndGameMessage {
+            opacity: 1;
+        }
+
+        .DTCanvas {
+            opacity: 1;
+            transition: 5s opacity;
+        }
+
+        .end-mode .DTCanvas {
+            opacity: 0;
+        }
     </style>
 </head>
-<body>
+<body class="main-menu">
     <!-- <script type="text/javascript" src="main.js"></script> -->
     <div id="ActorHoverInfo" class="ActorHoverInfo">
         <div id="CTHLabel" class="CTHLabel"></div>
@@ -159,10 +301,26 @@
             <!-- <div class="TileDef">FloorHexes</div> -->
         </div>
     </div>
+    <div class="SelectedActorInfo">
+        <div><span class="Label">HP: </span><span class="HPValue Value"></span></div>
+        <div><span class="Label">Weapon: </span><span class="WeaponValue Value"></span></div>
+        <div><span class="Label">Actions: </span><span class="ActionsValue Value"></span></div>
+    </div>
     <div class="ErrorMessage NoDisplay">
         <div><span>Something went wrong:</span></div>
         <div><p class="MessageText"></p></div>
     </div>
+    <div class="VisibleInMainMenu">
+        <div class="TitleText">D-Tac</div>
+        <div class="StartText NoDisplay">Click to start</div>
+        <div class="WadDropZone">
+            <div class="DropText">Choose a Doom .WAD to load: <input type="file" class="FileInput"/></div>
+            <div class="WadLoadingInfo"></div>
+        </div>
+    </div>
+    <div class="EndGameMessage"></div>
+
+    <span class="EnemyTurnText">Enemy Turn</span>
     <script type="text/javascript" src="main.bundle.js"></script>
 </body>
 </html>
