@@ -163,6 +163,7 @@ const Resources = {
       let loadingEl = document.querySelector(".WadLoadingInfo");
       let i = 0;
       let dots = [".", "..", "..."];
+      loadingEl.innerText = `Loading [${as}]${dots[i++ % dots.length]}`;
       wadLocal.onProgress = function() {
         console.info("Loading [" + as + "]...");
         loadingEl.innerText = `Loading [${as}]${dots[i++ % dots.length]}`;
@@ -222,6 +223,7 @@ function reallyStart() {
   let midblob = URL.createObjectURL(new Blob([mid]));
   function playMusic() {
     MIDIjs.play(midblob);
+    MIDIjs.set_volume(0.1);
     setTimeout(playMusic, 326000)
   }
   playMusic();
@@ -2903,6 +2905,7 @@ const ActorDefs = {
     onpickup: (actor) => {
       if (!g_GotRedCard) {
         g_GotRedCard = true;
+        showMessage("Picked up the Red Keycard. You can exit now.");
         playSound(ITEM_PICKUP_SOUND);
         return true;
       }
@@ -3749,9 +3752,13 @@ function playMode(dt) {
     return;
   }
 
-  if (allOnExit && g_GotRedCard) {
-    endGame("A winner is you!");
-    return;
+  if (allOnExit) {
+    if (g_GotRedCard) {
+      endGame("A winner is you!");
+      return;
+    } else {
+      showMessage("You need the Red Keycard to exit.")
+    }
   }
 
 
