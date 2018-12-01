@@ -3,7 +3,7 @@ const {Keys} = require("./keys.js");
 const {Maps} = require("./maps.js");
 const {degToRad, radToDeg, clamp} = THREE.Math;
 
-const DEV = true;
+const DEV = false;
 const OPTIMIZE_WORLD = !DEV;
 const TILE_X = 1.0, TILE_Y = 0.3, TILE_Z = 1.0;
 const SIDE_PLAYER = 0, SIDE_AI = 1;
@@ -193,17 +193,17 @@ function reallyStart() {
   let pos;
   for (let actor of g_World.actors) {
     actor.visibilityCheck()
-    if (!pos && actor.side == SIDE_PLAYER) { pos = actor.position; break}
+    if (!pos && actor.side == SIDE_PLAYER) { pos = actor.object.position; break}
   }
+  if (!pos) pos = new THREE.Vector3();
   g_MainCamera = new THREE.PerspectiveCamera( 20, window.innerWidth / window.innerHeight, 0.1, 1000 );
-  g_MainCamera.position.x = pos.x - 12;
-  g_MainCamera.position.z = pos.z - 12;
-  g_MainCamera.position.y = pos.y + 16;
+  // g_MainCamera.lookAt(pos);
   g_MainCameraControls = new THREE.MapControls( g_MainCamera, g_Renderer.context.canvas );
   g_MainCameraControls.minPolarAngle = degToRad(30);
   g_MainCameraControls.maxPolarAngle = degToRad(85);
   // g_MainCameraControls.enableDamping = true;
   // g_MainCameraControls.dampingFactor = 0.20;
+  g_MainCamera.position.set(pos.x - 18, pos.y + 21, pos.z - 18);
   g_MainCameraControls.target.set(pos.x, pos.y, pos.z);
   g_MainCameraControls.onBeforeUpdate = function() {
     if (g_MainCameraControls._changedZoom()) g_MainCameraControlsZoomChanged = true;
@@ -3341,9 +3341,20 @@ function updateSelectedActorUI() {
   actions.innerText = (actor ? `${actor.actionsLeft} / ${actor.maxActions}` : "N/A");
 }
 
+function showMessage(msg, timeout=3000) {
+  let el = document.querySelector(".SomeMessage");
+  if (el) {
+    el.innerText = msg;
+    el.style.opacity = 1.0;
+    setTimeout(() => {
+      el.style.opacity = 0.0;
+    }, timeout);
+  }
+}
+
 function playerSelectActor(actor) {
   if (actor && actor.actionsLeft == 0) {
-    // showMessage("No actions left.");
+    showMessage("No actions left.");
     return false;
   }
   g_SelectedActor = actor;
@@ -3479,6 +3490,7 @@ function showHoverCursorAt(position, colorHex) {
 let g_SelectedActor;
 let g_TrackedActor;
 let g_MainCameraLerping = false;
+let g_FirstLerp = true;
 let g_TurnCount = 0;
 
 const PLAY_MODE = 0, EDIT_MODE = 1, MAIN_MENU_MODE = 2, END_MODE = 3;
@@ -3680,12 +3692,39 @@ function endGame(message) {
   toggleMode(END_MODE);
 }
 
+const CAM_OFFSET = new THREE.Vector3(-16, 21, -16);
+let g_DidIntro = false;
+function* doIntro() {
+  let keypos = new THREE.Vector3(15, 4, 20);
+  let exitpos = new THREE.Vector3(31, 2, 2)
+  yield* doWait(0.5);
+
+  for (let [nextpos, spd, msg] of [[keypos, 4, "Grab the Red Keycard..."], [exitpos, 5, "...and get to the exit area."]]) {
+    let t = nextpos;
+    showMessage(msg, 10000);
+    while (!almostEqual(g_MainCameraControls.target, t, 0.1)) {
+      let dt = yield;
+      moveTowards(g_MainCameraControls.target, t, dt * spd);
+      let g = g_MainCameraControls.target.clone();
+      g.add(CAM_OFFSET);
+      moveTowards(g_MainCamera.position, g, dt * spd);
+    }
+    doWait(3.5);
+  }
+  doWait(2.5);
+}
+
 function playMode(dt) {
+  if (!g_CurrentAction && !g_DidIntro) {
+    g_CurrentAction = doIntro();
+  }
+
   let justFinishedAnAction = false;
   if (g_CurrentAction) {
     resetCTH(g_CTHEstimator);
     let r = g_CurrentAction.next(dt);
     if (r.done) {
+      g_DidIntro = true;
       g_CurrentAction = null;
       justFinishedAnAction = true;
     }
@@ -3761,7 +3800,7 @@ function playMode(dt) {
     }
   }
 
-  if (g_MainCameraLerping || g_CurrentAction) {
+  if (g_DidIntro && (g_MainCameraLerping || g_CurrentAction)) {
     g_MainCameraLerping = true;
 
     const PAN = 8, ROTATE = 3;
@@ -3788,9 +3827,10 @@ function playMode(dt) {
   g_World.actors.forEach(actor => actor.update(dt));
 }
 
+let g_LastCurrentTime = undefined;
 function mainLoop(currentTime) {
-  let dt = (this.lastCurrentTime ? currentTime - this.lastCurrentTime : 0) / 1000.0;
-  this.lastCurrentTime = currentTime;
+  let dt = (g_LastCurrentTime ? currentTime - g_LastCurrentTime : 0) / 1000.0;
+  g_LastCurrentTime = currentTime;
   requestAnimationFrame( mainLoop );
 
   updateActorHoverInfo(null);

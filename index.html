@@ -252,6 +252,24 @@
             opacity: 1;
         }
 
+        .SomeMessage {
+            position: absolute;
+            font-size: 2em;
+            background-color: rgba(0, 0, 0, 0.35);
+            color: orange;
+            font-family: sans-serif;
+            left: 50%;
+            top: 70%;
+            padding: 0.25em;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            transition: opacity 0.5s;
+        }
+
+        body:not(.play-mode) .SomeMessage {
+            display: none !important;
+        }
+
         .EndGameMessage {
             font-size: 3em;
             font-family: sans-serif;
@@ -319,7 +337,7 @@
         </div>
     </div>
     <div class="EndGameMessage"></div>
-
+    <div class="SomeMessage"></div>
     <span class="EnemyTurnText">Enemy Turn</span>
     <script type="text/javascript" src="main.bundle.js"></script>
 </body>
